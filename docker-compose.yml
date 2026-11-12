@@ -1,0 +1,16 @@
+# Put DOMAIN=yourdomain.com in the same .env file. Run: docker compose up -d --build
+services:
+  app:
+    build: .
+    env_file: .env
+    environment: { NODE_ENV: production, DB_FILE: /data/data.db }
+    volumes: [ "data:/data", "./certs:/app/certs:ro" ]
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    ports: [ "80:80", "443:443" ]
+    environment: { DOMAIN: "${DOMAIN}" }
+    volumes: [ "./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data" ]
+    depends_on: [ app ]
+    restart: unless-stopped
+volumes: { data: {}, caddy_data: {} }

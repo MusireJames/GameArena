@@ -1,0 +1,5 @@
+# Used by docker-compose. For a plain server install, copy this to /etc/caddy/Caddyfile, replace {$DOMAIN} with your domain and use localhost:3000.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000
+}
