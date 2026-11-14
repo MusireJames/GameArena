@@ -491,7 +491,7 @@ app.get('/api/tournaments/:id', auth, (req, res) => {
 app.post('/api/tournaments', auth, (req, res) => {
   const b = req.body, game = b.game, name = String(b.name || '').trim().slice(0, 40), fee = Math.floor(+b.fee) || 0, size = Math.floor(+b.size);
   const g = game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+b.g) || 2)) : 2, bad = m => res.status(400).json({ error: m });
-  if (!['chess', 'checkers', 'tictactoe', 'ludo'].includes(game)) return bad('Pick a game');
+  if (!GAME_IDS.includes(game)) return bad('Pick a game');
   if (name.length < 3) return bad('Give the tournament a name of at least 3 letters');
   if (!T_SIZES[g].includes(size)) return bad('For ' + g + ' players per match the size must be one of: ' + T_SIZES[g].join(', '));
   if (fee < 0 || (fee > 0 && fee < 10) || fee > 100000) return bad('The entry fee must be 0, or between KES 10 and KES 100,000');
