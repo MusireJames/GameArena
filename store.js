@@ -51,16 +51,21 @@ async function upload(db, why = 'timer') {
   } finally { fs.rmSync(tmp, { force: true }); }
 }
 
-let timer = null, lastChanges = -1, running = false;
+let timer = null, lastChanges = -1, running = false, runFn = null, pending = null;
 function startBackups(db) {
   if (!s3.configured()) { console.warn('Off-site backups are NOT configured (BACKUP_S3_*). Your data is only as safe as the disk it is on.'); return; }
-  const every = Math.max(1, +E.BACKUP_INTERVAL_MIN || 10) * 60000;
+  const every = Math.max(1, +E.BACKUP_INTERVAL_MIN || 2) * 60000;
   const run = async why => {
     if (running) return; running = true;
-    try { const c = db.prepare('select total_changes() c').get().c; if (why === 'timer' && c === lastChanges) return; lastChanges = c; await upload(db, why); }
+    try { const c = db.prepare('select total_changes() c').get().c; if (why !== 'startup' && c === lastChanges) return; lastChanges = c; await upload(db, why); }
     catch (e) { console.error('Off-site backup FAILED:', e.message); lastChanges = -1; } finally { running = false; }
   };
-  setTimeout(() => run('startup'), 30000).unref?.(); timer = setInterval(() => run('timer'), every); timer.unref?.();
+  runFn = run; setTimeout(() => run('startup'), 15000).unref?.(); timer = setInterval(() => run('timer'), every); timer.unref?.();
+}
+/** Called after any change request (sign-up, deposit, withdrawal...): saves a fresh copy a few seconds later, so new accounts are not lost if the host restarts. */
+function touch() {
+  if (!runFn || pending) return;
+  pending = setTimeout(() => { pending = null; runFn('change'); }, 8000); pending.unref?.();
 }
 /** Called when the server is told to stop (a deploy or restart): saves the very latest data before the disk can be wiped. */
 async function snapshotNow(db, why = 'shutdown') {
@@ -84,4 +89,4 @@ async function restoreIfMissing(file) {
 /** Fetch one named snapshot (for manual recovery): node store.js restore hourly/07  or  daily/2026-11-12 */
 async function restoreFrom(name, file) { const b = await s3.get(prefix() + name + '.db.gz'); if (!b) throw new Error('No such backup: ' + name); fs.writeFileSync(file, unpack(b)); }
 
-module.exports = { open, pack, unpack, upload, startBackups, snapshotNow, restoreIfMissing, restoreFrom, snapshotFile, configured: s3.configured };
+module.exports = { touch, open, pack, unpack, upload, startBackups, snapshotNow, restoreIfMissing, restoreFrom, snapshotFile, configured: s3.configured };
