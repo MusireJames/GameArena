@@ -58,6 +58,7 @@ const legal = f => (req, res) => res.type('html').send(require('fs').readFileSyn
 ['terms', 'privacy', 'responsible'].forEach(p => app.get('/' + p + '.html', legal(p + '.html')));
 app.use(express.static('public'));
 const srv = http.createServer(app), io = new Server(srv);
+const kePhone = p => { const n = norm(p); return /^254[17]\d{8}$/.test(n) ? n : null; };   // Kenyan mobile numbers only (07.., 01.., +254..)
 const norm = p => { p = String(p).replace(/\D/g, ''); return p.startsWith('0') ? '254' + p.slice(1) : p.startsWith('254') ? p : '254' + p; };
 const tok = id => { const r = db.prepare('select tv, uuid from users where id=?').get(id); return jwt.sign({ id, u: r.uuid, tv: r.tv || 0 }, SECRET, { expiresIn: '7d' }); };   // u = the account's random permanent id; tv changes when the password is reset, which signs out other devices
 const sameAccount = (row, p) => !!row && !!p.u && row.uuid === p.u && (row.tv || 0) === (p.tv || 0);   // old tokens (no "u") and tokens for a replaced database are refused
@@ -248,14 +249,23 @@ app.post('/api/deposit', auth, async (req, res) => {
   if (u0.ex && u0.ex > new Date().toISOString()) return res.status(403).json({ error: 'Your account is on a self-exclusion break' });
   if (u0.dl) { const used = db.prepare("select coalesce(sum(amount),0) s from txs where uid=? and type='deposit' and status!='failed' and date(created)=date('now')").get(req.uid).s;
     if (used + amt > u0.dl) return res.status(400).json({ error: 'This would exceed your daily deposit limit of KES ' + u0.dl }); }
-  try { const r = await pay.startDeposit(req.uid, amt); r.error ? res.status(400).json({ error: r.error }) : res.json({ ok: true, ref: r.id, message: r.message }); }
+  let ph = null; if (req.body.phone) { ph = kePhone(req.body.phone); if (!ph) return res.status(400).json({ error: 'Enter a valid Safaricom number, for example 0712345678' }); }
+  try { const r = await pay.startDeposit(req.uid, amt, ph); r.error ? res.status(400).json({ error: r.error }) : res.json({ ok: true, ref: r.id, message: r.message }); }
   catch (e) { console.error('Deposit failed:', e); res.status(500).json({ error: 'Could not start the deposit. Please try again.' }); }
 });
 app.post('/api/withdraw', auth, (req, res) => {   // the wallet is debited at once and the payout is sent straight away (or held for approval if it is large)
   const amt = Math.floor(+req.body.amount);
   if (!(amt >= 50)) return res.status(400).json({ error: 'Minimum KES 50' });
   if (amt > 150000) return res.status(400).json({ error: 'Maximum KES 150,000 per withdrawal' });
-  try { const r = pay.createWithdrawal(req.uid, amt); res.json({ ok: true, review: r.review }); }
+  let ph = null, force = false;
+  if (req.body.phone) {   // paying out to a number other than the registered one: needs the password, and larger amounts are checked by an admin first
+    ph = kePhone(req.body.phone); if (!ph) return res.status(400).json({ error: 'Enter a valid Safaricom number, for example 0712345678' });
+    const u = db.prepare('select phone, hash from users where id=?').get(req.uid);
+    if (ph === u.phone) ph = null;
+    else { if (!bcrypt.compareSync(String(req.body.password || ''), u.hash)) return res.status(401).json({ error: 'Enter your password to withdraw to a different number' });
+      force = amt >= (+E.OTHER_NUMBER_REVIEW_OVER || 1000); }
+  }
+  try { const r = pay.createWithdrawal(req.uid, amt, ph, force); res.json({ ok: true, review: r.review }); }
   catch (e) { e.user ? res.status(400).json({ error: e.message }) : (console.error('Withdrawal failed:', e), res.status(500).json({ error: 'Could not start the withdrawal. Please try again.' })); }
 });
 
