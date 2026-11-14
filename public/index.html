@@ -177,7 +177,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
  <div><div class="card"><h2>Create a tournament</h2>
   <div class="f"><label>Name</label><input id="tn" maxlength="40" placeholder="Friday Night Chess Cup"></div>
   <div class="fg" style="margin-top:16px">
-   <div class="f"><label>Game</label><select id="tg" onchange="tOpts()"><option value="chess">Chess</option><option value="checkers">Checkers</option><option value="tictactoe">Tic-Tac-Toe</option><option value="ludo">Ludo</option></select></div>
+   <div class="f"><label>Game</label><select id="tg" onchange="tOpts()"><option value="chess">Chess</option><option value="checkers">Checkers</option><option value="tictactoe">Tic-Tac-Toe</option><option value="ludo">Ludo</option><option value="connect4">Connect Four</option><option value="reversi">Reversi</option><option value="gomoku">Gomoku</option></select></div>
    <div class="f hide" id="tgw"><label>Players per match</label><select id="tgp" onchange="tOpts()"><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></div>
    <div class="f"><label>Tournament size</label><select id="tsz" onchange="tCalc()"></select></div>
    <div class="f money"><label>Entry fee (KES)</label><input id="tfee" type="number" min="0" value="100" oninput="tCalc()"></div>
