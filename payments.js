@@ -26,7 +26,7 @@ function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, al
   const STUCK = 10 * 60000;
   const LOW_SERVICE = +E.PALPLUSS_MIN_SERVICE_BALANCE || 500;
 
-  for (const c of ['pid text', "note text default ''", 'idem text', 'upd integer default 0', 'tries integer default 0', 'nexts integer default 0', 'at integer default 0']) try { db.exec('alter table txs add column ' + c); } catch {}
+  for (const c of ['pid text', "note text default ''", 'idem text', 'upd integer default 0', 'tries integer default 0', 'nexts integer default 0', 'at integer default 0', 'phone text']) try { db.exec('alter table txs add column ' + c); } catch {}
   db.exec('create unique index if not exists ux_txs_pid on txs(pid) where pid is not null; create index if not exists ix_txs_open on txs(type, status)');
 
   // ---- helpers ----
@@ -48,14 +48,14 @@ function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, al
   const spend = () => { const now = clock(); userCalls = userCalls.filter(t => now - t < 60000); if (userCalls.length >= 20 || !apiOpen()) return false; userCalls.push(now); return true; };
 
   // ---------------- DEPOSITS ----------------
-  async function startDeposit(uid, amt) {
+  async function startDeposit(uid, amt, phone) {
     const u = db.prepare('select phone from users where id=?').get(uid);
     const open = db.prepare("select id from txs where uid=? and type='deposit' and status='pending' and at>? order by id desc").get(uid, clock() - 90000);
     if (open) return { ok: true, id: open.id, reused: true, message: 'An M-Pesa prompt is already waiting on your phone. Enter your PIN, or wait a minute and try again.' };
-    const id = Number(db.prepare("insert into txs(uid,type,amount,ref,status,at) values(?,?,?,?,?,?)").run(uid, 'deposit', amt, '', 'pending', clock()).lastInsertRowid);
+    const id = Number(db.prepare("insert into txs(uid,type,amount,ref,status,at,phone) values(?,?,?,?,?,?,?)").run(uid, 'deposit', amt, '', 'pending', clock(), phone || u.phone).lastInsertRowid);
     const ref = 'D' + id; db.prepare('update txs set ref=? where id=?').run(ref, id);   // accountReference is limited to 12 characters
     try {
-      const d = await pp.stkPush({ amount: amt, phone: u.phone, accountReference: ref, transactionDesc: 'GameArena', callbackUrl: cbUrl(id) });
+      const d = await pp.stkPush({ amount: amt, phone: phone || u.phone, accountReference: ref, transactionDesc: 'GameArena', callbackUrl: cbUrl(id) });
       if (d.id) try { db.prepare('update txs set pid=?, upd=? where id=? and pid is null').run(d.id, clock(), id); } catch (e) { flag('Could not save PalPluss id for deposit ' + id + ': ' + e.message); }
       return { ok: true, id, message: 'Check your phone and enter your M-Pesa PIN' };
     } catch (e) {
@@ -119,13 +119,13 @@ function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, al
     return done;
   }
 
-  function createWithdrawal(uid, amt) {   // wallet debit + record in one atomic step; the payout itself is sent right after
-    let id, review = amt >= REVIEW;
+  function createWithdrawal(uid, amt, phone, forceReview) {   // wallet debit + record in one atomic step; the payout itself is sent right after
+    let id, review = amt >= REVIEW || !!forceReview;
     inTxn(() => {
       const b = db.prepare('select balance from users where id=?').get(uid)?.balance || 0;
       if (b < amt) throw Object.assign(new Error('Insufficient balance'), { user: true });
       add(uid, -amt, 'withdrawal');
-      id = Number(db.prepare("insert into txs(uid,type,amount,ref,status,at,nexts) values(?,?,?,?,?,?,0)").run(uid, 'withdraw', amt, '', review ? 'review' : 'queued', clock()).lastInsertRowid);
+      id = Number(db.prepare("insert into txs(uid,type,amount,ref,status,at,nexts,phone) values(?,?,?,?,?,?,0,?)").run(uid, 'withdraw', amt, '', review ? 'review' : 'queued', clock(), phone || null).lastInsertRowid);
       db.prepare('update txs set ref=?, idem=? where id=?').run('WD-' + id, 'gamearena-wd-' + id, id);
     });
     pushBal(uid);
@@ -146,7 +146,7 @@ function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, al
         const found = await pp.findByReference('B2C', t.ref, t.at);
         if (found) { db.prepare("update txs set status='pending', pid=coalesce(pid,?), note='', nexts=0 where id=? and status='queued'").run(found.id, id); return applyWithdraw(get(id), found); }
       }
-      const d = await pp.b2c({ amount: t.amount, phone: local(u.phone), reference: t.ref, description: 'GameArena payout', callbackUrl: cbUrl(id), idempotencyKey: t.idem });
+      const d = await pp.b2c({ amount: t.amount, phone: local(t.phone || u.phone), reference: t.ref, description: 'GameArena payout', callbackUrl: cbUrl(id), idempotencyKey: t.idem });
       db.prepare("update txs set status='pending', pid=?, note='', upd=?, nexts=? where id=? and status='queued'").run(d.id, clock(), clock() + 15000, id);
       if (d.status === 'SUCCESS' || d.status === 'FAILED') applyWithdraw(get(id), d);
     } catch (e) { onPayoutError(get(id), e); }
