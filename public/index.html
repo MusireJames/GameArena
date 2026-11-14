@@ -168,8 +168,10 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 </section>
 <section id="p-wallet" class="page"><div class="cols">
  <div class="card"><h2>Balance</h2><div class="bal" id="bal2">KES 0</div><div class="f"><label>Amount (KES)</label><input id="amt" type="number" min="0" placeholder="e.g. 500"></div>
+  <div class="f"><label>M-Pesa number</label><input id="mp" type="tel" inputmode="tel" placeholder="Leave empty to use your registered number"></div>
+  <div class="f" id="pwf" style="display:none"><label>Your password (needed to withdraw to a different number)</label><input id="pw" type="password" autocomplete="current-password"></div>
   <div class="btns" style="margin-top:20px"><button class="pri" onclick="pay('deposit')">Deposit with M-Pesa</button><button onclick="pay('withdraw')">Withdraw</button></div>
-  <p class="note">Deposits send an M-Pesa prompt to your registered number: enter your PIN and your balance updates automatically. Withdrawals are sent to the same M-Pesa number. Large withdrawals are reviewed before payment.</p></div>
+  <p class="note">Type an M-Pesa number to deposit from or withdraw to, or leave it empty to use your registered number. Deposits send a prompt to that phone: enter your PIN and your balance updates automatically. Withdrawing to a different number needs your password, and larger amounts are checked first. Large withdrawals are reviewed before payment.</p></div>
  <div class="card"><h2>Recent activity</h2><div id="hist" class="mute"></div></div></div></section>
 <section id="p-tour" class="page"><div class="cols"><div id="tlist"></div>
  <div><div class="card"><h2>Create a tournament</h2>
@@ -312,7 +314,8 @@ function peek(code){code=String(code||'').trim().toUpperCase();$('code').value=c
   $('rules').classList.remove('hide');
   $('rules').innerHTML=`<div class="item" style="border:0;padding:0"><div><b>${GN[r.game]}</b><span class="tag">${r.stake?'KES '+r.stake+' stake':'Free'}</span><span class="tag">${r.n}/${r.size} players</span><div class="mute" style="font-size:13px">Host: ${esc(r.host)} · ${r.stake?'You pay KES '+r.stake+' to enter. The winner takes the pot minus the platform fee.':'No money involved.'}</div></div><button class="pri" onclick="join('${r.code}')">${r.stake?'Agree & stake KES '+r.stake:'Join table'}</button></div>`})}
 const join=code=>{sel=null;rm=null;sock.emit('join',{code},r=>{if(r?.error)toast(r.error);else $('rules').classList.add('hide')})};
-async function pay(k){const j=await api(k,{amount:$('amt').value});if(j.error)return toast(j.error);
+$('mp').addEventListener('input',()=>{$('pwf').style.display=$('mp').value.trim()?'':'none'});
+async function pay(k){const j=await api(k,{amount:$('amt').value,phone:$('mp').value.trim()||undefined,password:k=='withdraw'?$('pw').value:undefined});$('pw').value='';if(j.error)return toast(j.error);
  if(k=='deposit'){toast(j.message||'Check your phone and enter your M-Pesa PIN');watch(j.ref)}else toast(j.review?'Withdrawal sent for approval':'Withdrawal requested. M-Pesa will confirm shortly')}
 function watch(ref){if(!ref)return;let n=0;const t=setInterval(async()=>{n++;const s=await api('pay/status/'+ref);
  if(s.status&&s.status!='pending'||n>70){clearInterval(t);toast(s.status=='done'?'Deposit received. Your balance is updated.':s.status=='failed'?'The payment was not completed':s.status=='review'?'Your payment is being reviewed':'Still waiting for the M-Pesa payment')}},3000)}
