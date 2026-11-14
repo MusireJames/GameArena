@@ -44,7 +44,7 @@ db.exec("insert into ledger(uid,amount,note) select id,balance,'opening balance'
 try { db.exec('create unique index if not exists ux_email on users(email) where email is not null'); } catch {}
 const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '4mb', verify: (req, res, buf) => { req.rawBody = buf; } })); app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' });
   if (PROD) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains'); next(); });
-app.use('/api', (req, res, next) => { res.set({ 'Cache-Control': 'no-store', Vary: 'Authorization' }); next(); });   // a proxy or browser must never reuse one person's answer for another
+app.use('/api', (req, res, next) => { if (req.method === 'POST') res.on('finish', () => store.touch()); next(); });   // a proxy or browser must never reuse one person's answer for another
 app.get('/.well-known/assetlinks.json', (req, res) => {   // lets a Play Store (TWA) build open the site full screen
   const fp = (E.ANDROID_SHA256 || '').split(',').map(x => x.trim()).filter(Boolean);
   res.json(E.ANDROID_PACKAGE && fp.length ? [{ relation: ['delegate_permission/common.handle_all_urls'], target: { namespace: 'android_app', package_name: E.ANDROID_PACKAGE, sha256_cert_fingerprints: fp } }] : []);
