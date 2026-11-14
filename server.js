@@ -15,9 +15,9 @@ if (PROD) {   // refuse to run live with unsafe settings
   if (STAKES && (!E.CALLBACK_SECRET || E.CALLBACK_SECRET.length < 16)) bad.push('CALLBACK_SECRET must be set (run: npm run secret)');
   if (STAKES && !E.PALPLUSS_API_KEY) bad.push('PALPLUSS_API_KEY is missing (or set STAKES_ENABLED=0 to launch with free play only)');
   if (E.RENDER && !E.ALLOW_TEMP_DB && !store.configured() && !/^\/(var\/data|data|mnt|disk)\//.test(E.DB_FILE || '')) bad.push('Render wipes its disk on every deploy, so customer accounts and money records would be lost. Attach a Persistent Disk and set DB_FILE=/var/data/data.db, or set the BACKUP_S3_* variables (see DEPLOY.md)');
-  if (!E.AT_API_KEY && !E.SMTP_HOST) bad.push('Set up SMS (AT_API_KEY) or email (SMTP_HOST) so verification codes can be sent');
+  if (!E.AT_API_KEY && !messaging.emailConfigured()) bad.push('Set up SMS (AT_API_KEY) or email (MAIL_RELAY_URL + MAIL_RELAY_SECRET, or SMTP_HOST) so verification codes can be sent');
   if (bad.length) { console.error('\nCannot start in production:\n - ' + bad.join('\n - ') + '\n'); process.exit(1); }
-  if (STAKES && !/^pk_live_/.test(E.PALPLUSS_API_KEY || '')) console.warn('WARNING: PALPLUSS_API_KEY is not a live key (pk_live_...), so no real money will move.');
+  if (STAKES && !/^p[pk]_live_/.test(E.PALPLUSS_API_KEY || '')) console.warn('WARNING: PALPLUSS_API_KEY is not a live key (pp_live_...), so no real money will move.');
   if (STAKES && !E.LICENCE_NO) console.warn('WARNING: LICENCE_NO is not set. Do not accept real-money play without a Gambling Regulatory Authority (GRA) licence.');
 }
 const db = store.open(Database, E.DB_FILE || 'data.db');   // WAL + synchronous=FULL: a committed deposit survives a crash
@@ -44,7 +44,8 @@ db.exec("insert into ledger(uid,amount,note) select id,balance,'opening balance'
 try { db.exec('create unique index if not exists ux_email on users(email) where email is not null'); } catch {}
 const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '4mb', verify: (req, res, buf) => { req.rawBody = buf; } })); app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' });
   if (PROD) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains'); next(); });
-app.use('/api', (req, res, next) => { if (req.method === 'POST') res.on('finish', () => store.touch()); next(); });   // a proxy or browser must never reuse one person's answer for another
+app.use('/api', (req, res, next) => { res.set({ 'Cache-Control': 'no-store', Vary: 'Authorization' }); next(); });
+app.use('/api', (req, res, next) => { if (req.method === 'POST') res.on('finish', () => store.touch()); next(); });   // save an off-site copy a few seconds after any change   // a proxy or browser must never reuse one person's answer for another
 app.get('/.well-known/assetlinks.json', (req, res) => {   // lets a Play Store (TWA) build open the site full screen
   const fp = (E.ANDROID_SHA256 || '').split(',').map(x => x.trim()).filter(Boolean);
   res.json(E.ANDROID_PACKAGE && fp.length ? [{ relation: ['delegate_permission/common.handle_all_urls'], target: { namespace: 'android_app', package_name: E.ANDROID_PACKAGE, sha256_cert_fingerprints: fp } }] : []);
