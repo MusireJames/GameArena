@@ -1,25 +1,6 @@
-node_modules/
-
-# Environment secrets
+node_modules
 .env
-.env.*
-!.env.example
-
-# Runtime data and backups
-data.db
-data.db-shm
-data.db-wal
-backups/
-
-# Logs and local certificates
-*.log
-npm-debug.log*
-certs/
-
-# Android signing material and build output
-android/keys/*.keystore
-android/*.apk
-
-# OS files
-.DS_Store
-Thumbs.db
+data.db*
+backups
+android/keys
+*.keystore

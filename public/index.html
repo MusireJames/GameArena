@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>StakeArena</title><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#1a1a18"><link rel="apple-touch-icon" href="/icon-192.png">
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>GameArena</title><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#1a1a18"><link rel="apple-touch-icon" href="/icon-192.png">
 <style>
 :root{--bg:#1a1a18;--card:#262522;--card2:#2e2d2a;--line:#3d3b37;--mute:#a3a29c;--ac:#81b64c;--acf:#0f1a07}
 *{box-sizing:border-box;transition:background-color .25s ease,border-color .25s ease,color .25s ease,opacity .25s ease,transform .18s ease}
@@ -47,6 +47,13 @@ footer{border-top:1px solid var(--line);padding:24px;text-align:center;color:var
 .dot{position:absolute;width:26%;height:26%;border-radius:50%;background:rgba(0,0,0,.32);animation:pop .2s ease both}
 .sel .pc{animation:lift .5s ease infinite alternate}
 .disc{width:74%;height:74%;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.55em;color:#fff}.dw{background:#e74c3c;border:3px solid #b03a2e}.db{background:#2b2b2b;border:3px solid #555}
+.bgrid{display:grid;grid-template-columns:repeat(var(--w),1fr);gap:3px;width:100%;max-width:440px;padding:8px;border-radius:14px;border:2px solid transparent;background:var(--card2)}.bgrid.mine{border-color:var(--ac)}
+.bgrid>div{aspect-ratio:1;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:8px;background:rgba(255,255,255,.04)}.bgrid>div:hover{background:rgba(255,255,255,.1)}
+.bgrid>div>i{display:block;width:82%;height:82%;border-radius:50%}.bgrid .p1>i{background:#f5f5f5;box-shadow:inset 0 -3px 0 rgba(0,0,0,.25)}.bgrid .p2>i{background:#1b1b1b;border:2px solid #777}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.dot.p1{background:#f5f5f5}.dot.p2{background:#1b1b1b;border:1px solid #777}
+.bgrid.connect4>div>i{width:86%;height:86%;background:rgba(0,0,0,.45)}.bgrid.connect4 .p1>i{background:#ffb300}.bgrid.connect4 .p2>i{background:#e53935;border:0}.bgrid.connect4{background:#1565c0}.bgrid.connect4>div{background:transparent}
+.bgrid.reversi{background:#1b5e20}.bgrid.reversi>div>i{width:78%;height:78%}.bgrid.reversi .hint>i{background:rgba(255,255,255,.22);width:30%;height:30%}
+.bgrid.gomoku{gap:0;padding:4px;background:#c9a15a;max-width:480px}.bgrid.gomoku>div{border-radius:0;background:transparent;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.45)}.bgrid.gomoku>div>i{width:74%;height:74%}
+.bgrid .new>i{animation:pop .3s ease both}.bgrid .win>i{outline:3px solid var(--ac);animation:winpulse .6s ease-in-out infinite alternate}
 #ttt{display:grid;grid-template-columns:repeat(3,96px);gap:8px;animation:pop .35s ease both}#ttt div{height:96px;border:1px solid var(--line);background:var(--card2);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:800;cursor:pointer}#ttt div:hover{border-color:var(--ac);transform:scale(1.04)}
 .tx{color:#4fc3f7}.to{color:#ffb74d}
 #ludo{width:min(88vw,460px);border-radius:22px;border:3px solid var(--line);animation:pop .35s ease both}.tk{transition:none}.ring{animation:ringp .9s ease-in-out infinite alternate;transform-box:fill-box;transform-origin:center}
@@ -119,7 +126,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 .nostakes .money{display:none!important}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body>
-<header><div class="bar"><div class="logo"><i></i>STAKEARENA</div>
+<header><div class="bar"><div class="logo"><i></i>GAMEARENA</div>
 <nav id="nav" class="hide"><button data-tab="play" class="on" onclick="tab('play');scrollTo(0,0)">Play</button><button class="money" data-tab="wallet" onclick="tab('wallet');scrollTo(0,0)">Wallet</button><button data-tab="tour" onclick="tab('tour');scrollTo(0,0)"><span class="lg">Tournaments</span><span class="sm">Cups</span></button><button data-tab="ranks" onclick="tab('ranks');scrollTo(0,0)">Ranks</button><button data-tab="chat" onclick="tab('chat');scrollTo(0,0)">Chat<i id="cbadge" class="badge hide"></i></button><button data-tab="acct" onclick="tab('acct');scrollTo(0,0)">Account</button></nav>
 <div id="top" class="right hide"><span id="onl" class="mute"></span><span id="who" class="mute"></span><span class="pill money" id="bal">KES 0</span></div></div></header>
 <main>
@@ -156,7 +163,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
   <div><div class="card"><h2>Join with a code</h2><div class="row nw"><input id="code" placeholder="Table code" style="text-transform:uppercase"><button class="pri" onclick="peek($('code').value)">Find</button></div><div id="rules" class="hide" style="margin-top:20px"></div></div>
    <div class="card"><h2>Public tables</h2><div id="rooms"></div></div></div>
  </div>
- <div id="game" class="card hide"><div id="stage"><div id="info" class="status"></div><div id="clock" class="mute"></div><div id="pls" class="pls"></div><div id="wait" class="hide" style="width:100%"></div><div id="board" class="bd hide"></div><div id="ck" class="bd hide"></div><div id="ttt" class="hide"></div><svg id="ludo" class="hide" viewBox="0 0 450 450"></svg><div id="lctl" class="row hide"></div><div id="acts" class="row"></div><button onclick="leave()">Leave table</button>
+ <div id="game" class="card hide"><div id="stage"><div id="info" class="status"></div><div id="clock" class="mute"></div><div id="pls" class="pls"></div><div id="wait" class="hide" style="width:100%"></div><div id="board" class="bd hide"></div><div id="ck" class="bd hide"></div><div id="ttt" class="hide"></div><div id="bg" class="hide"></div><svg id="ludo" class="hide" viewBox="0 0 450 450"></svg><div id="lctl" class="row hide"></div><div id="acts" class="row"></div><button onclick="leave()">Leave table</button>
  <div style="width:100%;max-width:520px"><div id="msgs" style="height:96px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13px"></div><div class="row nw" style="margin-top:8px"><input id="cm" placeholder="Message" onkeydown="if(event.key=='Enter')say()"><button onclick="say()">Send</button></div></div></div></div>
 </section>
 <section id="p-wallet" class="page"><div class="cols">
@@ -188,7 +195,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
   <div class="f"><label>Take a break</label><div class="row nw"><select id="ex"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option><option value="180">6 months</option></select><button onclick="excl()">Self-exclude</button></div></div><p class="note">Self-exclusion cannot be undone until it ends. You can still withdraw.</p></div>
   <div class="card"><h2>Help and support</h2><div class="f"><label>Dispute a result or ask a question</label><textarea id="tk" placeholder="Describe the problem, include the table code if you have it"></textarea></div><button class="btn1" style="margin-top:16px" onclick="ticket()">Send message</button></div></div></div></section>
 </div></main>
-<footer>18+ only. Play responsibly. <span id="lic"></span><br><a href="/terms.html">Terms</a>·<a href="/privacy.html">Privacy</a>·<a href="/responsible.html">Responsible play</a></footer>
+<footer>18+ only. Play responsibly. <span id="lic"></span><br><a href="/how-it-works.html">How it works</a>·<a href="/terms.html">Terms</a>·<a href="/privacy.html">Privacy</a>·<a href="/responsible.html">Responsible play</a></footer>
 <div id="tdet" class="hide" style="position:fixed;inset:0;z-index:35;background:#1a1a18;overflow-y:auto;padding:16px"><div class="card" id="tdc" style="max-width:900px;margin:0 auto"></div></div>
 <div id="tm" class="hide" style="position:fixed;inset:0;z-index:45;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center"><div class="card" style="max-width:380px;width:90%;text-align:center;margin:0"><h2>Your match is ready</h2><div id="tmi"></div><div class="btns" style="margin-top:16px"><button class="pri" onclick="tPlay(+$('tm').dataset.room)">Play now</button><button onclick="$('tm').classList.add('hide')">Later</button></div></div></div>
 <div id="end" class="hide" data-r=""><div id="fx"></div><div class="card endc"><div id="eico" class="eico"></div><h1 id="ettl"></h1><p id="esub" class="mute" style="margin:0"></p><div id="emoney" class="emoney"></div><div id="emeta" class="emeta"></div>
@@ -200,7 +207,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 <script>
 let tok=localStorage.t,S,me,sock,sel=null,G='chess',rm=null,tEnd=null,curId=0,clkAt=0,prevId=0,lastRoll=null,bv=0,lg=[],lmKey='',endFor=0;
 const $=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
-const GAMES=[['chess','♞','Chess','#81b64c','#0f1a07'],['checkers','●','Checkers','#d9452f','#ffffff'],['ludo','⚄','Ludo','#fdd835','#1a1500'],['tictactoe','✕','Tic-Tac-Toe','#4fc3f7','#00212e']],GN=Object.fromEntries(GAMES.map(g=>[g[0],g[2]]));
+const GAMES=[['chess','♞','Chess','#81b64c','#0f1a07'],['checkers','●','Checkers','#d9452f','#ffffff'],['ludo','⚄','Ludo','#fdd835','#1a1500'],['tictactoe','✕','Tic-Tac-Toe','#4fc3f7','#00212e'],['connect4','◍','Connect Four','#ffb300','#1a1100'],['reversi','◐','Reversi','#26a69a','#00201d'],['gomoku','◎','Gomoku','#ab47bc','#ffffff']],GN=Object.fromEntries(GAMES.map(g=>[g[0],g[2]]));
 const api=async(p,b)=>(await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:b&&JSON.stringify(b)})).json().catch(()=>({error:'Server error'}));
 function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.classList.add('out');setTimeout(()=>d.remove(),260)},3000)}
 function tiles(){const g=GAMES.find(x=>x[0]==G),st=document.body.style;st.setProperty('--ac',g[3]);st.setProperty('--acf',g[4]);
@@ -225,7 +232,7 @@ let tcur=0,TF=0.1;const TS={2:[4,8,16,32],3:[9,27],4:[16,64]};
 function tOpts(){const l=$('tg').value=='ludo';$('tgw').classList.toggle('hide',!l);$('ttcw').classList.toggle('hide',$('tg').value!='chess');const g=l?+$('tgp').value:2;
  $('tsz').innerHTML=TS[g].map(n=>`<option value="${n}">${n} players</option>`).join('');tCalc()}
 function tCalc(){const f=+$('tfee').value||0,n=+$('tsz').value||0,pool=f*n,prize=Math.floor(pool*(1-TF));
- $('tcalc').innerHTML=f?`Prize pool when full: <b>KES ${pool}</b>. The champion receives <b>KES ${prize}</b> (${Math.round((1-TF)*100)}%). StakeArena keeps ${Math.round(TF*100)}% to run the site. Whatever is in their wallet can be withdrawn.`:'Free tournament: glory only.'}
+ $('tcalc').innerHTML=f?`Prize pool when full: <b>KES ${pool}</b>. The champion receives <b>KES ${prize}</b> (${Math.round((1-TF)*100)}%). GameArena keeps ${Math.round(TF*100)}% to run the site. Whatever is in their wallet can be withdrawn.`:'Free tournament: glory only.'}
 async function tCreate(){const g=$('tg').value=='ludo'?+$('tgp').value:2,j=await api('tournaments',{name:$('tn').value,game:$('tg').value,g,size:+$('tsz').value,fee:+$('tfee').value||0,tc:$('ttc').value,enter:$('tenter').checked});
  if(j.error)return toast(j.error);toast('Tournament created');$('tn').value='';tLoad();tOpen(j.id)}
 async function tLoad(){const l=await api('tournaments');if(!Array.isArray(l))return;
@@ -319,12 +326,20 @@ function draw(s){S=s;const SN=prevId==s.id?{b:snap($('board')),c:snap($('ck')),l
  if(s.started&&!s.over&&s.players.length==2&&s.game!='ludo'){if(!s.drawBy)a+=`<button onclick="sock.emit('drawOffer')">Offer draw</button>`;else if(s.drawBy!=me.id)a+=`<button class="pri" onclick="sock.emit('drawAccept')">Accept draw</button>`;else a+='<span class="mute">Draw offered...</span>'}
  if(s.over&&!s.tid)a+=rm?`<button class="pri" onclick="join('${rm.code}')">Join rematch${rm.stake?' (KES '+rm.stake+')':''}</button>`:`<button class="pri" onclick="rematch()">Rematch</button>`;
  $('acts').innerHTML=a;
- ['board','ck','ttt','ludo','lctl'].forEach(k=>$(k).classList.add('hide'));$('wait').classList.toggle('hide',full);if(!full){$('end').classList.add('hide');$('pill').classList.add('hide');waitRoom(s);return}
+ ['board','ck','ttt','bg','ludo','lctl'].forEach(k=>$(k).classList.add('hide'));$('wait').classList.toggle('hide',full);if(!full){$('end').classList.add('hide');$('pill').classList.add('hide');waitRoom(s);return}
  if(s.game=='chess'&&s.fen)chess(s,mine,SN.b,my);
  if(s.game=='checkers'&&s.ck)checkers(s,mine,my,SN.c);
  if(s.game=='tictactoe'&&s.board){const tx=$('ttt');tx.classList.remove('hide');tx.classList.toggle('mine',!!my);const ln=s.line||[];
  tx.innerHTML=s.board.map((c,i)=>`<div class="${s.lm===i?'new':''}${ln.includes(i)?' win':''}" onclick="sock.emit('move',{i:${i}})">${c?`<span class="${c=='X'?'tx':'to'}">${c}</span>`:''}</div>`).join('')}
+ if(['connect4','reversi','gomoku'].includes(s.game)&&s.board)grid(s,my);
  if(s.game=='ludo'&&s.ludo)drawLudo(s,SN.l);if(s.over&&s.started)endCheck(s);else{$('end').classList.add('hide');$('pill').classList.add('hide')}}
+function grid(s,my){const bx=$('bg'),g=s.game,W=g=='connect4'?7:g=='gomoku'?15:8,ln=s.line||[],mv=s.mv||[];bx.className='bgrid '+g+(my?' mine':'');bx.style.setProperty('--w',W);
+ const cell=(c,i)=>{const cls=[c?'p'+c:'',s.lm===i?'new':'',ln.includes(i)?'win':'',g=='reversi'&&my&&mv.includes(i)?'hint':''].join(' ');
+  const act=g=='connect4'?`sock.emit('move',{c:${i%7}})`:`sock.emit('move',{i:${i}})`;return `<div class="${cls}" onclick="${act}"><i></i></div>`};
+ bx.innerHTML=s.board.map(cell).join('');
+ if(g=='reversi'){const a=s.board.filter(x=>x==1).length,z=s.board.filter(x=>x==2).length;$('pls').innerHTML=s.names.map((n,i)=>`<span class="pl${s.turn==i&&!s.over?' on':''}">${esc(n)} · ${i?z:a}</span>`).join('')}
+ else $('pls').innerHTML=s.names.map((n,i)=>`<span class="pl${s.turn==i&&!s.over?' on':''}"><span class="dot p${i+1}"></span>${esc(n)}</span>`).join('');
+ if(s.note)toast(s.note)}
 function waitRoom(s){const mi=s.players.indexOf(me.id),host=mi==0,all=s.ready.every(Boolean)&&s.players.length>=2;
  $('wait').innerHTML=`<div class="mute" style="text-align:center">Share this code to challenge friends</div><div style="font-size:40px;font-weight:800;letter-spacing:.2em;text-align:center">${s.code}</div>
  <div class="row" style="justify-content:center"><button onclick="navigator.clipboard?.writeText('${s.code}');toast('Code copied')">Copy code</button></div>
@@ -335,7 +350,7 @@ function waitRoom(s){const mi=s.players.indexOf(me.id),host=mi==0,all=s.ready.ev
 const rematch=()=>{sel=null;rm=null;sock.emit('create',{game:S.game,stake:S.stake,size:S.size,listed:false},r=>toast(r?.error||'Rematch table ready. Other players were notified.'))};
 const say=()=>{sock.emit('chat',$('cm').value);$('cm').value=''};
 async function side(){const [h,l]=await Promise.all([api('history'),fetch('/api/leaderboard').then(r=>r.json())]);
- $('hist').innerHTML=h.length?h.map(x=>`<div class="item"><span>${x.t=='game'?esc(x.label)+' · '+esc(x.status):esc(x.t)+' · '+esc(x.status)}</span><b>${x.t=='withdraw'?'-':x.amount>0?'+':''}${x.amount}</b></div>`).join(''):'Nothing yet';
+ $('hist').innerHTML=h.length?h.map(x=>`<div class="item"><span>${x.t=='game'?esc(x.label)+' · '+esc(x.status):esc(x.t)+' · '+esc(({queued:'sending soon',pending:'processing',review:'awaiting approval',done:'completed',failed:'failed (refunded)',rejected:'rejected (refunded)'})[x.status]||x.status)}</span><b>${x.t=='withdraw'?'-':x.amount>0?'+':''}${x.amount}</b></div>`).join(''):'Nothing yet';
  $('lb').innerHTML=l.map((u,i)=>`<div class="item"><span>${i+1}. ${esc(u.name)}</span><b>${u.rating}</b></div>`).join('')}
 async function setLim(){const j=await api('limits',{daily:$('lim').value});toast(j.error||'Daily limit saved')}
 async function excl(){if(!confirm('You will be locked out of games and deposits for this period and cannot undo it. Continue?'))return;const j=await api('limits',{exclude:$('ex').value});toast(j.error||'Break started. Reload the page to apply.')}
@@ -422,5 +437,5 @@ function drawLudo(s,old){$('ludo').classList.remove('hide');$('lctl').classList.
   if(p[0]!=+e.dataset.x||p[1]!=+e.dataset.y)e.animate([{transform:`translate(${p[0]-e.dataset.x}px,${p[1]-e.dataset.y}px)`},{transform:'none'}],{duration:340,easing:'cubic-bezier(.2,.8,.2,1)'})});
  const rolled=L.last!=lastRoll;lastRoll=L.last;
  $('lctl').innerHTML=`<span class="die${rolled&&L.last?' roll':''}">${L.last||'-'}</span>`+(my&&!L.die?`<button class="pri" onclick="sock.emit('roll')">Roll dice</button>`:'')+(my&&L.die?' Tap a glowing token':'')+(L.msg?` <span class="lmsg">${esc(L.msg)}</span>`:'')+` <span class="mute">(you are player ${mine+1}, ${CN[L.seat[mine]]})</span>`}
-amode('login');fetch('/api/config').then(r=>r.json()).then(c=>{document.body.classList.toggle('nostakes',c.stakes===false);TF=c.tfee??TF;if(c.stakes===false){$('stake').value=0;$('tfee').value=0;tCalc()}$('lic').textContent=c.licence?'Licence: '+c.licence:'';if(c.google&&!/StakeArenaApp/.test(navigator.userAgent))initGoogle(c.google)}).catch(()=>{});start();
+amode('login');fetch('/api/config').then(r=>r.json()).then(c=>{document.body.classList.toggle('nostakes',c.stakes===false);TF=c.tfee??TF;if(c.stakes===false){$('stake').value=0;$('tfee').value=0;tCalc()}$('lic').textContent=c.licence?'Licence: '+c.licence:'';if(c.google&&!/GameArenaApp/.test(navigator.userAgent))initGoogle(c.google)}).catch(()=>{});start();
 </script></body></html>

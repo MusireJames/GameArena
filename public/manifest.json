@@ -1,7 +1,7 @@
 {
  "id": "/",
- "name": "StakeArena",
- "short_name": "StakeArena",
+ "name": "GameArena",
+ "short_name": "GameArena",
  "description": "Chess, Checkers, Ludo and more. Play free or stake with M-Pesa.",
  "start_url": "/",
  "scope": "/",

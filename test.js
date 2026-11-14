@@ -4,23 +4,28 @@ const { io } = require('socket.io-client'), Database = require('better-sqlite3')
 const PORT = 3999, DB = 'test.db', URL = 'http://localhost:' + PORT, sleep = ms => new Promise(r => setTimeout(r, ms));
 const post = async (p, b, t) => (await fetch(URL + '/api/' + p, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(t && { Authorization: 'Bearer ' + t }) }, body: JSON.stringify(b) })).json();
 const emit = (c, ev, d) => new Promise(r => c.emit(ev, d, r));
-const http = require('http'), crypto = require('crypto');
-function mockPaystack(port) {   // stands in for api.paystack.co so the whole money flow can be tested offline
-  const charges = {}, transfers = [];
+const http = require('http');
+function mockPalPluss(port) {   // stands in for api.palpluss.com so the whole money flow can be tested offline
+  const txs = new Map(); let seq = 0;
   const srv = http.createServer((req, res) => { let b = ''; req.on('data', c => b += c); req.on('end', () => {
-    const j = b ? JSON.parse(b) : {}, send = d => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ status: true, data: d })); };
-    if (req.url === '/charge') { charges[j.reference] = j; return send({ status: 'pay_offline', reference: j.reference, display_text: 'Please check your phone' }); }
-    if (req.url.startsWith('/transaction/verify/')) { const c = charges[decodeURIComponent(req.url.split('/').pop())]; return send(c ? { status: 'success', amount: c.amount, currency: c.currency } : { status: 'abandoned' }); }
-    if (req.url === '/transferrecipient') return send({ recipient_code: 'RCP_' + j.account_number });
-    if (req.url === '/transfer') { transfers.push(j); return send({ status: 'pending', reference: j.reference }); }
+    const j = b ? JSON.parse(b) : {}, url = new URL(req.url, 'http://x'), send = d => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ success: true, data: d })); };
+    if (req.headers.authorization !== 'Basic ' + Buffer.from('pk_test_abc123:').toString('base64')) { res.statusCode = 401; return res.end('{"success":false,"error":{"code":"INVALID_API_KEY"}}'); }
+    const mk = (type, extra) => { const t = { transactionId: 'T' + ++seq, type, status: 'PENDING', currency: 'KES', amount: j.amount, ...extra }; txs.set(t.transactionId, t); return t; };
+    if (req.method === 'POST' && url.pathname === '/payments/stk') return send(mk('STK', { accountReference: j.accountReference }));
+    if (req.method === 'POST' && url.pathname === '/b2c/payouts') return send(mk('B2C', { reference: j.reference }));
+    if (req.method === 'GET' && url.pathname.startsWith('/transactions/')) { const t = txs.get(decodeURIComponent(url.pathname.split('/').pop())); if (t) return send(t); res.statusCode = 404; return res.end('{"success":false,"error":{"code":"TRANSACTION_NOT_FOUND"}}'); }
+    if (req.method === 'GET' && url.pathname === '/transactions') return send({ items: [...txs.values()].reverse(), nextCursor: null });
+    if (req.method === 'GET' && url.pathname === '/wallets/service/balance') return send({ availableBalance: 100000 });
     res.statusCode = 404; res.end('{}'); }); });
-  return new Promise(r => srv.listen(port, () => r({ srv, charges, transfers })));
+  const find = ref => [...txs.values()].find(t => t.accountReference === ref || t.reference === ref);
+  return new Promise(r => srv.listen(port, () => r({ srv, txs, find, payouts: () => [...txs.values()].filter(t => t.type === 'B2C') })));
 }
-const hook = (body, key = 'sk_test_abc123') => fetch(URL + '/api/paystack/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-paystack-signature': crypto.createHmac('sha512', key).update(JSON.stringify(body)).digest('hex') }, body: JSON.stringify(body) });
+const CBS = 'testcallbacksecret1234';
+const hook = (id, secret = CBS) => fetch(`${URL}/api/palpluss/webhook/${secret}/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
 test('deposits, staked game payout, withdrawals, 18+ rule and ledger', async () => {
   fs.rmSync(DB, { force: true });
-  const srv = spawn('node', ['server.js'], { env: { ...process.env, PORT, DB_FILE: DB, JWT_SECRET: 't', PLATFORM_FEE: '0.1', DEV_SHOW_CODES: '1', NODE_ENV: 'test', PAYSTACK_BASE: 'http://localhost:3990', PAYSTACK_SECRET_KEY: 'sk_test_abc123', ANDROID_PACKAGE: 'com.stakearena.app', ANDROID_SHA256: 'AA:BB:CC', ADMIN_PHONES: '0711111111' }, stdio: 'inherit' });
-  const socks = []; const mock = await mockPaystack(3990);
+  const srv = spawn('node', ['server.js'], { env: { ...process.env, PORT, DB_FILE: DB, JWT_SECRET: 't', PLATFORM_FEE: '0.1', DEV_SHOW_CODES: '1', NODE_ENV: 'test', PALPLUSS_BASE: 'http://localhost:3990', PALPLUSS_API_KEY: 'pk_test_abc123', CALLBACK_SECRET: CBS, BASE_URL: 'http://localhost:3999', ANDROID_PACKAGE: 'com.gamearena.app', ANDROID_SHA256: 'AA:BB:CC', ADMIN_PHONES: '0711111111' }, stdio: 'inherit' });
+  const socks = []; const mock = await mockPalPluss(3990);
   try {
     await sleep(1500);
     const reg = async (phone, name, dob) => { const s = await post('register/start', { phone, name, password: 'secret1', dob, email: name.toLowerCase() + phone + '@test.com' }); if (s.error) return s; return post('register/verify', { phone, code: s.devCode }); };
@@ -52,14 +57,15 @@ test('deposits, staked game payout, withdrawals, 18+ rule and ledger', async () 
     const ghost = require('jsonwebtoken').sign({ id: 9999 }, 't');
     assert.equal((await fetch(URL + '/api/me', { headers: { Authorization: 'Bearer ' + ghost } })).status, 401, 'a login for a deleted or missing account is rejected, not a crash');
     const db = new Database(DB), bal = n => db.prepare('select balance from users where name=?').get(n).balance;
-    // deposits through Paystack: prompt -> signed webhook -> wallet
+    // deposits through PalPluss: STK prompt -> (unsigned) webhook nudge -> server re-checks with PalPluss -> wallet
     const dep = async (tk, kes) => { const d = await post('deposit', { amount: kes }, tk); assert.ok(d.ref, 'a deposit starts an M-Pesa prompt'); return d.ref; };
-    const ok = (ref, amt) => ({ event: 'charge.success', data: { reference: ref, amount: amt, currency: 'KES', status: 'success' } });
+    const pay = (ref, status = 'SUCCESS', amount) => { const t = mock.find('D' + ref); t.status = status; if (amount != null) t.amount = amount; return t; };
     const refA = await dep(A.token, 1000), refB = await dep(B.token, 1000);
-    assert.equal((await hook(ok(refA, 100000), 'wrong-key')).status, 401, 'a webhook with a bad signature is rejected'); assert.equal(bal('A'), 0);
-    await hook(ok(refA, 100000)); await hook(ok(refA, 100000)); await sleep(100); assert.equal(bal('A'), 1000, 'the deposit reaches the wallet once, even if the webhook is repeated');
-    const st = await (await fetch(URL + '/api/pay/status/' + refB, { headers: { Authorization: 'Bearer ' + B.token } })).json(); assert.equal(st.status, 'done', 'the status check settles a deposit when the webhook is late'); assert.equal(bal('B'), 1000);
-    const refX = await dep(A.token, 50); await hook(ok(refX, 1)); await sleep(100); assert.equal(bal('A'), 1000, 'a payment for the wrong amount is not credited'); assert.ok(db.prepare("select 1 from flags where note like 'Deposit amount mismatch%'").get());
+    assert.equal((await hook(refA, 'wrong-secret-wrong')).status, 403, 'a webhook with the wrong secret is rejected'); assert.equal(bal('A'), 0);
+    await hook(refA); await sleep(150); assert.equal(bal('A'), 0, 'a webhook alone does not credit: PalPluss says the payment is still pending');
+    pay(refA); await hook(refA); await hook(refA); await sleep(300); assert.equal(bal('A'), 1000, 'the deposit reaches the wallet once, even if the webhook is repeated');
+    pay(refB); const st = await (await fetch(URL + '/api/pay/status/' + refB, { headers: { Authorization: 'Bearer ' + B.token } })).json(); assert.equal(st.status, 'done', 'the status check settles a deposit when the webhook never arrives'); assert.equal(bal('B'), 1000);
+    const refX = await dep(A.token, 50); pay(refX, 'SUCCESS', 1); await hook(refX); await sleep(300); assert.equal(bal('A'), 1000, 'a payment for the wrong amount is not credited'); assert.equal(db.prepare("select status from txs where id=?").get(refX).status, 'review');
     db.prepare('update users set balance=1000 where name=?').run('A');   // reset after the mismatch test (ledger is checked separately)
     const ca = io(URL, { auth: { token: A.token } }), cb = io(URL, { auth: { token: B.token } }); socks.push(ca, cb);
     let endS; ca.on('state', s => { if (s.over) endS = s; });
@@ -75,22 +81,18 @@ test('deposits, staked game payout, withdrawals, 18+ rule and ledger', async () 
     assert.equal(endS.pay, 180); assert.ok(endS.winner); assert.deepEqual(endS.line, [0, 1, 2], 'results screen gets the payout and the winning line');
     assert.ok(db.prepare("select 1 from ledger where note='winnings'").get(), 'payout is in the ledger');
     assert.equal((await fetch(URL + '/healthz')).status, 200, 'health check works');
-    assert.equal((await (await fetch(URL + '/.well-known/assetlinks.json')).json())[0].target.package_name, 'com.stakearena.app', 'Android asset links are served');
+    assert.equal((await (await fetch(URL + '/.well-known/assetlinks.json')).json())[0].target.package_name, 'com.gamearena.app', 'Android asset links are served');
     assert.ok((await fetch(URL + '/offline.html')).ok && (await fetch(URL + '/icon-512.png')).ok, 'offline page and app icons are served'); assert.equal((await (await fetch(URL + '/api/config')).json()).stakes, true);
-    const aid = db.prepare("select id from users where name='A'").get().id, mk = ref => db.prepare('insert into txs(uid,type,amount,ref) values(?,?,?,?)').run(aid, 'deposit', 300, ref);
-    const cbk = (ref, amt, secret = 'dev-callback-secret') => fetch(URL + '/api/daraja/stk-callback/' + secret, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ Body: { stkCallback: { CheckoutRequestID: ref, ResultCode: 0, CallbackMetadata: { Item: [{ Name: 'Amount', Value: amt }] } } } }) });
-    mk('r1'); assert.equal((await cbk('r1', 300, 'wrong')).status, 403); await sleep(100); assert.equal(bal('A'), 1080, 'callback with the wrong secret is ignored');
-    await cbk('r1', 5); await sleep(100); assert.equal(bal('A'), 1080, 'callback with the wrong amount is not credited'); assert.ok(db.prepare("select 1 from flags where note like 'Deposit amount mismatch%'").get());
-    mk('r2'); await cbk('r2', 300); await cbk('r2', 300); await sleep(200); assert.equal(bal('A'), 1380, 'a real callback credits once and replays do not double-credit');
-    // withdrawals through Paystack transfers (no ID check any more)
-    const w1 = await post('withdraw', { amount: 500 }, A.token); assert.ok(w1.ok, 'withdrawal is accepted without ID verification'); assert.equal(bal('A'), 880);
-    assert.equal(mock.transfers.length, 1); assert.equal(mock.transfers[0].amount, 50000); const wref = mock.transfers[0].reference;
-    await hook({ event: 'transfer.failed', data: { reference: wref } }); await hook({ event: 'transfer.failed', data: { reference: wref } }); await sleep(100);
+    const r2 = await dep(A.token, 300); pay(r2); await hook(r2); await hook(r2); await sleep(300); assert.equal(bal('A'), 1380, 'a real deposit credits once and replays do not double-credit');
+    // withdrawals through PalPluss B2C
+    const lastWd = () => db.prepare("select id, ref, status from txs where type='withdraw' order by id desc limit 1").get();
+    const w1 = await post('withdraw', { amount: 500 }, A.token); assert.ok(w1.ok, 'withdrawal is accepted'); assert.equal(bal('A'), 880);
+    await sleep(300); assert.equal(mock.payouts().length, 1); assert.equal(mock.payouts()[0].amount, 500); const wd1 = lastWd(); assert.equal(mock.payouts()[0].reference, wd1.ref);
+    mock.payouts()[0].status = 'FAILED'; await hook(wd1.id); await hook(wd1.id); await sleep(300);
     assert.equal(bal('A'), 1380, 'a failed payout is refunded once');
-    const w2 = await post('withdraw', { amount: 500 }, A.token); assert.ok(w2.ok); const wref2 = mock.transfers[1].reference;
-    await hook({ event: 'transfer.success', data: { reference: wref2 } }); await sleep(100);
-    assert.equal(bal('A'), 880, 'a paid-out withdrawal stays deducted'); assert.equal(db.prepare('select status from txs where ref=?').get(wref2).status, 'done');
+    const w2 = await post('withdraw', { amount: 500 }, A.token); assert.ok(w2.ok); await sleep(300); const wd2 = lastWd();
+    mock.find(wd2.ref).status = 'SUCCESS'; await hook(wd2.id); await sleep(300);
+    assert.equal(bal('A'), 880, 'a paid-out withdrawal stays deducted'); assert.equal(db.prepare('select status from txs where id=?').get(wd2.id).status, 'done');
     // public chat
     const gotA = [], gotB = []; ca.on('pubmsg', m => gotA.push(m)); cb.on('pubmsg', m => gotB.push(m));
     assert.ok((await emit(ca, 'pub', { text: 'Hello everyone' })).ok); await sleep(150);
@@ -104,7 +106,7 @@ test('deposits, staked game payout, withdrawals, 18+ rule and ledger', async () 
     // tournaments: entry fees, knockout bracket, draws, payout of 90% to the champion
     const get = async (p, tk) => (await fetch(URL + '/api/' + p, { headers: { Authorization: 'Bearer ' + tk } })).json(), uid = async tk => (await get('me', tk)).id;
     const C = await reg('0766660001', 'C', '1990-01-01'), D = await reg('0766660002', 'D', '1990-01-01');
-    for (const tk of [C.token, D.token]) await hook(ok(await dep(tk, 500), 50000)); await sleep(150);
+    for (const tk of [C.token, D.token]) { const r = await dep(tk, 500); pay(r); await hook(r); } await sleep(400);
     const cc = io(URL, { auth: { token: C.token } }), cd = io(URL, { auth: { token: D.token } }); socks.push(cc, cd);
     for (const c of [ca, cb, cc, cd]) c.on('tmatch', m => c.emit('tjoin', { room: m.room }));   // players step into their matches
     const sockOf = { [await uid(A.token)]: ca, [await uid(B.token)]: cb, [await uid(C.token)]: cc, [await uid(D.token)]: cd }, bals = () => Object.fromEntries(Object.keys(sockOf).map(id => [id, db.prepare('select balance from users where id=?').get(id).balance]));
@@ -126,7 +128,7 @@ test('deposits, staked game payout, withdrawals, 18+ rule and ledger', async () 
     sockOf[fin.players[1].id].emit('resign'); await sleep(700);
     d = await get('tournaments/' + T.id, A.token); assert.equal(d.status, 'done'); assert.equal(d.winner, fin.players[0].id);
     const after = bals(); for (const id of Object.keys(sockOf)) assert.equal(after[id], entered[id] + (+id === d.winner ? 360 : 0), 'only the champion is paid, 90% of the KES 400 pool');
-    assert.equal(db.prepare('select coalesce(sum(amount),0) v from house').get().v - houseBefore, 40, 'StakeArena keeps 10% of the pool');
+    assert.equal(db.prepare('select coalesce(sum(amount),0) v from house').get().v - houseBefore, 40, 'GameArena keeps 10% of the pool');
     // cancelling a tournament refunds everyone
     const b1 = bals(), T2 = await post('tournaments', { name: 'Cancel Cup', game: 'tictactoe', g: 2, size: 4, fee: 50, enter: true }, C.token); assert.ok((await post(`tournaments/${T2.id}/join`, {}, D.token)).ok);
     assert.equal(bals()[await uid(C.token)], b1[await uid(C.token)] - 50); assert.ok((await post(`tournaments/${T2.id}/cancel`, {}, D.token)).error, 'only the creator can cancel');

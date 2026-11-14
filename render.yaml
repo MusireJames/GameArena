@@ -1,0 +1,36 @@
+# Render Blueprint: New > Blueprint, point it at your repo. A Persistent Disk needs a paid instance (Starter or above).
+# Without the disk, Render erases your database on every deploy and restart.
+services:
+  - type: web
+    name: gamearena
+    runtime: node
+    plan: starter
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    disk:
+      name: gamearena-data
+      mountPath: /var/data
+      sizeGB: 5
+    envVars:
+      - { key: NODE_ENV, value: production }
+      - { key: NODE_VERSION, value: "22" }
+      - { key: DB_FILE, value: /var/data/data.db }
+      - { key: JWT_SECRET, generateValue: true }
+      - { key: CALLBACK_SECRET, generateValue: true }
+      - { key: BASE_URL, sync: false }          # https://your-service.onrender.com or your own domain
+      - { key: PALPLUSS_API_KEY, sync: false }
+      - { key: ADMIN_PHONES, sync: false }
+      - { key: ADMIN_EMAIL, sync: false }
+      - { key: SMTP_HOST, sync: false }
+      - { key: SMTP_USER, sync: false }
+      - { key: SMTP_PASS, sync: false }
+      - { key: MAIL_FROM, sync: false }
+      - { key: COMPANY_NAME, sync: false }
+      - { key: LICENCE_NO, sync: false }
+      - { key: SUPPORT_EMAIL, sync: false }
+      - { key: BACKUP_S3_ENDPOINT, sync: false }
+      - { key: BACKUP_S3_BUCKET, sync: false }
+      - { key: BACKUP_S3_ACCESS_KEY, sync: false }
+      - { key: BACKUP_S3_SECRET_KEY, sync: false }
+      - { key: BACKUP_KEY, sync: false }

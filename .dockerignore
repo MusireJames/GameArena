@@ -1,5 +1,8 @@
 node_modules
-data.db
+data.db*
 test*.db
 backups
 .env
+android
+*.test.js
+.git

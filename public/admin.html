@@ -1,9 +1,9 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin · StakeArena</title>
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin · GameArena</title>
 <style>*{box-sizing:border-box}body{margin:0;background:#0a0a0a;color:#f5f5f5;font:15px/1.5 Inter,-apple-system,"Segoe UI",sans-serif}main{max-width:960px;margin:auto;padding:32px 24px}
 h1{letter-spacing:.2em;font-size:16px;margin:0 0 4px}h2{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#8c8c8c;margin:32px 0 12px}
 .g{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-top:20px}.c{border:1px solid #2a2a2a;border-radius:12px;padding:16px;background:#121212;color:#8c8c8c;font-size:13px}.c b{display:block;font-size:24px;color:#f5f5f5}
 .i{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-top:1px solid #2a2a2a}button{height:36px;background:transparent;color:#fff;border:1px solid #555;border-radius:8px;padding:0 14px;cursor:pointer}.p{background:#fff;color:#000}a{color:#fff}.m{color:#8c8c8c}img{max-width:100%;border-radius:8px;margin-top:8px}</style></head>
-<body><main><h1>STAKEARENA · ADMIN</h1><a href="/">Back to site</a><div id="o"></div></main>
+<body><main><h1>GAMEARENA · ADMIN</h1><a href="/">Back to site</a><div id="o"></div></main>
 <script>
 const t=localStorage.t,esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';'),api=async(p,b)=>(await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json',Authorization:'Bearer '+t},body:b&&JSON.stringify(b)})).json();
 async function act(p,d){const j=await api(p,d);if(j.error)alert(j.error);load()}
@@ -14,7 +14,10 @@ async function load(){const s=await api('admin/summary');if(s.error){document.ge
  <h2>Games</h2>${L(s.byGame,g=>`<div class="i"><span>${esc(g.game)}</span><span class="m">${g.plays} player-games · KES ${g.staked} staked</span></div>`)}
  <h2>ID verification</h2>${L(s.kyc,u=>`<div class="i" style="align-items:flex-start"><div><b>${esc(u.name)}</b> · ${esc(u.phone)} · ID ${esc(u.id_number)}<div id="k${u.id}"><button onclick="view(${u.id})" style="margin-top:8px">View photo</button></div></div><span><button class="p" onclick="act('admin/kyc',{uid:${u.id},action:'approve'})">Approve</button> <button onclick="act('admin/kyc',{uid:${u.id},action:'reject'})">Reject</button></span></div>`)}
  <h2>Withdrawals awaiting approval</h2>${L(s.review,w=>`<div class="i"><span>#${w.id} · ${esc(w.name)} · ${esc(w.phone)} · KES ${w.amount}</span><span><button class="p" onclick="act('admin/withdrawal',{id:${w.id},action:'approve'})">Approve</button> <button onclick="act('admin/withdrawal',{id:${w.id},action:'reject'})">Reject</button></span></div>`)}
- <h2>Withdrawals pending over 1 hour</h2>${L(s.stuck,w=>`<div class="i"><span>#${w.id} · ${esc(w.phone)} · KES ${w.amount}</span><span class="m">${w.created}</span></div>`)}
+ <h2>PalPluss payout wallet</h2><div class="i"><span>Balance available for withdrawals</span><b>${s.payBalance==null?'unknown':'KES '+esc(s.payBalance)}</b></div>
+ <h2>Withdrawals waiting for funds or retry</h2>${L(s.queued||[],w=>`<div class="i"><span>#${w.id} · ${esc(w.phone)} · KES ${w.amount}<div class="m">${esc(w.note||'')}</div></span><span class="m">${w.created}</span></div>`)}
+ <h2>Withdrawals sent but unconfirmed over 10 minutes</h2>${L(s.stuck,w=>`<div class="i"><span>#${w.id} · ${esc(w.phone)} · KES ${w.amount}</span><span class="m">${w.created}</span></div>`)}
+ <h2>Deposits needing a look</h2>${L(s.depReview||[],d=>`<div class="i"><span>#${d.id} · ${esc(d.phone)} · KES ${d.amount}<div class="m">${esc(d.note||'')}</div></span><span class="m">${d.created}</span></div>`)}
  <h2>Support messages</h2>${L(s.tickets,x=>`<div class="i" style="align-items:flex-start"><div><b>${esc(x.name)}</b> · ${esc(x.phone)} <span class="m">${x.created}</span><div>${esc(x.msg)}</div></div><button onclick="act('admin/ticket',{id:${x.id}})">Close</button></div>`)}
  <h2>Fraud and collusion flags</h2>${L(s.flags,f=>`<div class="i"><span>${esc(f.note)}</span><span class="m">${f.created}</span></div>`)}`}
 load();

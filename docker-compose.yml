@@ -4,7 +4,7 @@ services:
     build: .
     env_file: .env
     environment: { NODE_ENV: production, DB_FILE: /data/data.db }
-    volumes: [ "data:/data", "./certs:/app/certs:ro" ]
+    volumes: [ "data:/data" ]
     restart: unless-stopped
   caddy:
     image: caddy:2

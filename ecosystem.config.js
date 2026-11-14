@@ -1,1 +1,1 @@
-module.exports = { apps: [{ name: 'stakearena', script: 'server.js', env: { NODE_ENV: 'production' }, max_memory_restart: '400M' }] };
+module.exports = { apps: [{ name: 'gamearena', script: 'boot.js', env: { NODE_ENV: 'production' }, max_memory_restart: '400M', kill_timeout: 30000 }] };   // kill_timeout: lets the last off-site backup finish on restart

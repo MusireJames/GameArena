@@ -1,28 +1,34 @@
 require('dotenv').config(); const crypto = require('crypto');
 const express = require('express'), http = require('http'), { Server } = require('socket.io'), Database = require('better-sqlite3'),
-  bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken'), { Chess } = require('chess.js'), daraja = require('./daraja'), messaging = require('./messaging'), paystack = require('./paystack');
-const E = process.env, FEE = +E.PLATFORM_FEE || 0.1, SECRET = E.JWT_SECRET || 'dev-secret', CB_SECRET = E.CALLBACK_SECRET || 'dev-callback-secret';
-const PROD = E.NODE_ENV === 'production', STAKES = E.STAKES_ENABLED !== '0';
-const PAY = E.PAYMENT_PROVIDER === 'daraja' ? 'daraja' : 'paystack', GOOGLE_ID = E.GOOGLE_CLIENT_ID || '';
+  bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken'), { Chess } = require('chess.js'), messaging = require('./messaging'), pp = require('./palpluss'), createPayments = require('./payments'), store = require('./store'), BG = require('./boardgames');
+const E = process.env, FEE = +E.PLATFORM_FEE || 0.1;
+const PROD = E.NODE_ENV === 'production' || !!E.RENDER || E.FORCE_PRODUCTION === '1', STAKES = E.STAKES_ENABLED !== '0';   // Render counts as production even if NODE_ENV was forgotten
+// There is NO public default secret: a secret that is known to everyone lets anyone forge a login as any player.
+const SECRET = E.JWT_SECRET || (PROD ? '' : crypto.randomBytes(32).toString('hex')), CB_SECRET = E.CALLBACK_SECRET || (PROD ? '' : 'dev-callback-secret');
+const JWT_OPTS = { algorithms: ['HS256'] }, GOOGLE_ID = E.GOOGLE_CLIENT_ID || '';
 const TEST_DICE = !PROD && E.TEST_DICE ? E.TEST_DICE.split(',').map(Number) : [];   // test hook only, ignored in production   // STAKES_ENABLED=0 launches free play only
 if (PROD) {   // refuse to run live with unsafe settings
   const bad = [];
   if (!E.JWT_SECRET || E.JWT_SECRET.length < 32 || /put-a-long|change-me|dev-secret/.test(E.JWT_SECRET)) bad.push('JWT_SECRET must be a random string of 32+ characters (run: npm run secret)');
   if (E.DEV_SHOW_CODES === '1') bad.push('Remove DEV_SHOW_CODES from .env');
   if (!/^https:\/\//.test(E.BASE_URL || '')) bad.push('BASE_URL must be your public https address');
-  if (STAKES && PAY === 'daraja' && (!E.CALLBACK_SECRET || E.CALLBACK_SECRET.length < 16)) bad.push('CALLBACK_SECRET must be set (run: npm run secret)');
-  if (STAKES && PAY === 'daraja' && (!E.DARAJA_CONSUMER_KEY || !E.DARAJA_PASSKEY)) bad.push('Daraja keys are missing (or set STAKES_ENABLED=0 to launch with free play only)');
-  if (STAKES && PAY === 'paystack' && !E.PAYSTACK_SECRET_KEY) bad.push('PAYSTACK_SECRET_KEY is missing (or set STAKES_ENABLED=0 to launch with free play only)');
+  if (STAKES && (!E.CALLBACK_SECRET || E.CALLBACK_SECRET.length < 16)) bad.push('CALLBACK_SECRET must be set (run: npm run secret)');
+  if (STAKES && !E.PALPLUSS_API_KEY) bad.push('PALPLUSS_API_KEY is missing (or set STAKES_ENABLED=0 to launch with free play only)');
+  if (E.RENDER && !E.ALLOW_TEMP_DB && !store.configured() && !/^\/(var\/data|data|mnt|disk)\//.test(E.DB_FILE || '')) bad.push('Render wipes its disk on every deploy, so customer accounts and money records would be lost. Attach a Persistent Disk and set DB_FILE=/var/data/data.db, or set the BACKUP_S3_* variables (see DEPLOY.md)');
   if (!E.AT_API_KEY && !E.SMTP_HOST) bad.push('Set up SMS (AT_API_KEY) or email (SMTP_HOST) so verification codes can be sent');
   if (bad.length) { console.error('\nCannot start in production:\n - ' + bad.join('\n - ') + '\n'); process.exit(1); }
-  if (STAKES && PAY === 'daraja' && E.DARAJA_ENV !== 'production') console.warn('WARNING: DARAJA_ENV is not "production", so no real money will move.');
-  if (STAKES && PAY === 'paystack' && !/^sk_live_/.test(E.PAYSTACK_SECRET_KEY || '')) console.warn('WARNING: PAYSTACK_SECRET_KEY is not a live key (sk_live_...), so no real money will move.');
+  if (STAKES && !/^pk_live_/.test(E.PALPLUSS_API_KEY || '')) console.warn('WARNING: PALPLUSS_API_KEY is not a live key (pk_live_...), so no real money will move.');
   if (STAKES && !E.LICENCE_NO) console.warn('WARNING: LICENCE_NO is not set. Do not accept real-money play without a Gambling Regulatory Authority (GRA) licence.');
 }
-const db = new Database(E.DB_FILE || 'data.db');
+const db = store.open(Database, E.DB_FILE || 'data.db');   // WAL + synchronous=FULL: a committed deposit survives a crash
 db.exec(`create table if not exists users(id integer primary key, phone text unique, name text, hash text, balance integer default 0);
 create table if not exists txs(id integer primary key, uid integer, type text, amount integer, ref text, status text default 'pending', created text default current_timestamp)`);
-for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0']) try { db.exec('alter table users add column ' + c); } catch {}
+for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text']) try { db.exec('alter table users add column ' + c); } catch {}
+// Every account gets a random permanent id. Login tokens carry it, so a token can never be mistaken for another person's account
+// (account numbers 1, 2, 3... are re-used if a database is ever replaced, and that is how people ended up in each other's accounts).
+db.exec(`update users set uuid=lower(hex(randomblob(16))) where uuid is null;
+create trigger if not exists users_uuid after insert on users when new.uuid is null begin update users set uuid=lower(hex(randomblob(16))) where id=new.id; end;
+create unique index if not exists ux_users_uuid on users(uuid)`);
 db.exec(`create table if not exists plays(id integer primary key, uid integer, game text, stake integer, result text, net integer, pair text, created text default current_timestamp);
 create table if not exists ledger(id integer primary key, uid integer, amount integer, note text, created text default current_timestamp);
 create table if not exists otps(id integer primary key, key text, purpose text, code_hash text, payload text, expires integer, attempts integer default 0, sent_at integer);
@@ -32,11 +38,13 @@ create table if not exists t_matches(id integer primary key, tid integer, round 
 create table if not exists chat(id integer primary key, uid integer, name text, text text, reply_to integer, created text default current_timestamp);
 create table if not exists tickets(id integer primary key, uid integer, msg text, status text default 'open', created text default current_timestamp);
 create table if not exists house(id integer primary key, amount integer, created text default current_timestamp);
-create table if not exists flags(id integer primary key, note text, created text default current_timestamp)`);
+create table if not exists flags(id integer primary key, note text, created text default current_timestamp);
+create table if not exists escrow(rid integer, uid integer, amount integer, primary key(rid, uid))`);
 db.exec("insert into ledger(uid,amount,note) select id,balance,'opening balance' from users where balance!=0 and id not in (select uid from ledger)");
 try { db.exec('create unique index if not exists ux_email on users(email) where email is not null'); } catch {}
 const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '4mb', verify: (req, res, buf) => { req.rawBody = buf; } })); app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' });
   if (PROD) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains'); next(); });
+app.use('/api', (req, res, next) => { res.set({ 'Cache-Control': 'no-store', Vary: 'Authorization' }); next(); });   // a proxy or browser must never reuse one person's answer for another
 app.get('/.well-known/assetlinks.json', (req, res) => {   // lets a Play Store (TWA) build open the site full screen
   const fp = (E.ANDROID_SHA256 || '').split(',').map(x => x.trim()).filter(Boolean);
   res.json(E.ANDROID_PACKAGE && fp.length ? [{ relation: ['delegate_permission/common.handle_all_urls'], target: { namespace: 'android_app', package_name: E.ANDROID_PACKAGE, sha256_cert_fingerprints: fp } }] : []);
@@ -50,18 +58,23 @@ const legal = f => (req, res) => res.type('html').send(require('fs').readFileSyn
 app.use(express.static('public'));
 const srv = http.createServer(app), io = new Server(srv);
 const norm = p => { p = String(p).replace(/\D/g, ''); return p.startsWith('0') ? '254' + p.slice(1) : p.startsWith('254') ? p : '254' + p; };
-const tok = id => jwt.sign({ id, tv: db.prepare('select tv from users where id=?').get(id)?.tv || 0 }, SECRET, { expiresIn: '7d' });   // tv changes when the password is reset, which signs out other devices
-const auth = (req, res, next) => { try { const p = jwt.verify((req.headers.authorization || '').slice(7), SECRET), row = db.prepare('select tv from users where id=?').get(p.id); if (!row || (row.tv || 0) !== (p.tv || 0)) throw new Error('stale login'); req.uid = p.id; next(); } catch { res.status(401).json({ error: 'login' }); } };
+const tok = id => { const r = db.prepare('select tv, uuid from users where id=?').get(id); return jwt.sign({ id, u: r.uuid, tv: r.tv || 0 }, SECRET, { expiresIn: '7d' }); };   // u = the account's random permanent id; tv changes when the password is reset, which signs out other devices
+const sameAccount = (row, p) => !!row && !!p.u && row.uuid === p.u && (row.tv || 0) === (p.tv || 0);   // old tokens (no "u") and tokens for a replaced database are refused
+const auth = (req, res, next) => { try { const p = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET, JWT_OPTS), row = db.prepare('select tv, uuid from users where id=?').get(p.id); if (!sameAccount(row, p)) throw new Error('stale login'); req.uid = p.id; next(); } catch { res.status(401).json({ error: 'login' }); } };
 const bal = id => db.prepare('select balance from users where id=?').get(id).balance;
 const add = (id, n, note = n > 0 ? 'credit' : 'debit') => { db.prepare('update users set balance=balance+? where id=?').run(n, id); if (n) db.prepare('insert into ledger(uid,amount,note) values(?,?,?)').run(id, n, note); };   // every wallet change is logged
 const phoneOf = id => db.prepare('select phone from users where id=?').get(id)?.phone;
 const REVIEW = +E.WITHDRAW_REVIEW_OVER || 5000, isAdmin = id => (E.ADMIN_PHONES || '').split(',').filter(Boolean).map(norm).includes(phoneOf(id));
 
-const cbAuth = (req, res, next) => req.params.secret === CB_SECRET ? next() : res.status(403).end();   // only Safaricom (who knows the secret URL) can credit wallets
+const txn = fn => { db.exec('BEGIN IMMEDIATE'); try { const v = fn(); db.exec('COMMIT'); return v; } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; } };   // all or nothing, so a crash never leaves money half moved
+const hold = (rid, uid, amt) => { if (amt) txn(() => { add(uid, -amt, 'stake'); db.prepare('insert or replace into escrow(rid,uid,amount) values(?,?,?)').run(rid, uid, amt); }); };   // a stake taken for a live game is also written to disk...
+const unhold = (rid, uid) => db.prepare('delete from escrow where rid=? and uid=?').run(rid, uid);
+txn(() => { for (const e of db.prepare('select * from escrow').all()) add(e.uid, e.amount, 'stake refund (server restarted)'); db.exec('delete from escrow'); });   // ...because games live only in memory: at start-up every stake still held is given back
 const hits = new Map(), fails = new Map();   // fails: wrong-password times per phone   // simple in-memory rate limiter
 const limit = (n, ms) => (req, res, next) => { const k = req.ip + req.baseUrl + req.path, now = Date.now(), a = (hits.get(k) || []).filter(t => now - t < ms);
   if (a.length >= n) return res.status(429).json({ error: 'Too many attempts. Please wait a minute.' }); a.push(now); hits.set(k, a); next(); };
-app.use(['/api/login', '/api/register', '/api/otp', '/api/reset'], limit(30, 60000));   // per endpoint, per IP (many phones share one IP on mobile networks) app.use(['/api/deposit', '/api/withdraw'], limit(12, 60000)); app.use('/api/tournaments', limit(60, 60000));
+app.use(['/api/login', '/api/register', '/api/otp', '/api/reset'], limit(30, 60000));   // per endpoint, per IP (many phones share one IP on mobile networks)
+app.use(['/api/deposit', '/api/withdraw'], limit(12, 60000)); app.use('/api/tournaments', limit(60, 60000));
 app.get('/api/leaderboard', (req, res) => res.json(db.prepare("select name, rating from users u order by rating desc limit 10").all()));
 app.get('/api/history', auth, (req, res) => {
   const a = db.prepare("select type t, '' label, amount, status, created at from txs where uid=? order by id desc limit 20").all(req.uid);
@@ -75,7 +88,7 @@ app.post('/api/limits', auth, (req, res) => {   // responsible play: daily depos
   res.json({ ok: true });
 });
 const admin = (req, res, next) => isAdmin(req.uid) ? next() : res.status(403).json({ error: 'Admins only' });
-app.get('/api/admin/summary', auth, admin, (req, res) => {
+app.get('/api/admin/summary', auth, admin, async (req, res) => {
   const n = q => db.prepare(q).get().v;
   res.json({ users: n('select count(*) v from users'), balances: n('select coalesce(sum(balance),0) v from users'),
     deposits: n("select coalesce(sum(amount),0) v from txs where type='deposit' and status='done'"),
@@ -87,53 +100,23 @@ app.get('/api/admin/summary', auth, admin, (req, res) => {
     byGame: db.prepare('select game, count(*) plays, coalesce(sum(stake),0) staked from plays group by game').all(),
     kyc: db.prepare("select id, name, phone, id_number from users where kyc='pending'").all(),
     tickets: db.prepare("select t.id, t.msg, t.created, u.name, u.phone from tickets t join users u on u.id=t.uid where t.status='open' order by t.id").all(),
-    review: db.prepare("select t.id, t.amount, t.created, u.name, u.phone from txs t join users u on u.id=t.uid where t.type='withdraw' and t.status='review' order by t.id").all(),
-    stuck: db.prepare("select t.id, t.amount, t.created, u.phone from txs t join users u on u.id=t.uid where t.type='withdraw' and t.status='pending' and t.created < datetime('now','-1 hour')").all(),
+    ...pay.overview(), payBalance: await svcBalance(),   // review / queued / stuck withdrawals, and the PalPluss service wallet balance
+    depReview: db.prepare("select t.id, t.ref, t.amount, t.created, t.note, u.phone from txs t join users u on u.id=t.uid where t.type='deposit' and t.status='review' order by t.id").all(),
     flags: db.prepare('select note, created from flags order by id desc limit 20').all() });
 });
-// ---- Paystack: webhook (authoritative), status check, payouts ----
-const vAt = new Map();
-function settleDeposit(t, d) {   // d = Paystack transaction data, from the webhook or from the verify call
-  if (!t || t.status !== 'pending') return;
-  if (d.status === 'success') {
-    if (d.amount !== t.amount * 100 || (d.currency && d.currency !== 'KES')) {
-      db.prepare("update txs set status='review' where id=?").run(t.id);
-      db.prepare('insert into flags(note) values(?)').run('Deposit amount mismatch on tx ' + t.id + ': expected ' + t.amount * 100 + ', Paystack said ' + d.amount + ' ' + d.currency); return; }
-    db.prepare("update txs set status='done' where id=?").run(t.id); add(t.uid, t.amount, 'M-Pesa deposit'); pushBal(t.uid);
-  } else if (['failed', 'abandoned', 'reversed'].includes(d.status)) { db.prepare("update txs set status='failed' where id=?").run(t.id); pushBal(t.uid); }
-}
-function settleTransfer(t, status) {
-  if (!t) return;
-  if (status === 'success' && t.status === 'pending') { db.prepare("update txs set status='done' where id=?").run(t.id); pushBal(t.uid); }
-  else if (status === 'success' && t.status === 'failed') db.prepare('insert into flags(note) values(?)').run('Paystack paid withdrawal tx ' + t.id + ' that was already refunded to the wallet. Check this account.');
-  else if (status !== 'success' && ['pending', 'done'].includes(t.status)) { db.prepare("update txs set status='failed' where id=?").run(t.id); add(t.uid, t.amount, 'withdrawal failed, refunded'); pushBal(t.uid); }
-}
-app.post('/api/paystack/webhook', (req, res) => {
-  const sig = String(req.headers['x-paystack-signature'] || ''), want = crypto.createHmac('sha512', E.PAYSTACK_SECRET_KEY || '').update(req.rawBody || '').digest('hex');
-  if (!E.PAYSTACK_SECRET_KEY || sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return res.status(401).end();
-  res.sendStatus(200);
-  const { event, data } = req.body || {}; if (!data || !data.reference) return;
-  const dep = () => db.prepare("select * from txs where ref=? and type='deposit'").get(data.reference), wd = () => db.prepare("select * from txs where ref=? and type='withdraw'").get(data.reference);
-  if (event === 'charge.success') settleDeposit(dep(), { ...data, status: 'success' });
-  else if (event === 'charge.failed') settleDeposit(dep(), { status: 'failed' });
-  else if (event === 'transfer.success') settleTransfer(wd(), 'success');
-  else if (event === 'transfer.failed' || event === 'transfer.reversed') settleTransfer(wd(), 'failed');
+// ---- Deposits (STK Push) and withdrawals (B2C) through PalPluss. All the money logic is in payments.js and is tested in payments.test.js ----
+const alertAdmin = text => { console.warn('ALERT:', text); try { db.prepare('insert into flags(note) values(?)').run('ALERT: ' + String(text).slice(0, 480)); } catch {} if (E.ADMIN_EMAIL) messaging.notify(E.ADMIN_EMAIL, 'GameArena alert', text).catch(e => console.error('Alert email failed:', e.message)); };
+const pay = createPayments({ db, add, pushBal, pp, alert: alertAdmin, baseUrl: E.BASE_URL || '', secret: CB_SECRET });
+const svc = { at: 0, v: null }; const svcBalance = async () => { if (Date.now() - svc.at > 60000) { svc.at = Date.now(); try { svc.v = await pp.serviceBalance(); } catch { svc.v = null; } } return svc.v; };
+app.post('/api/palpluss/webhook/:secret/:id', (req, res) => {   // PalPluss does not sign webhooks, so this is only a nudge: payments.js confirms the result with PalPluss before moving any money
+  const a = Buffer.from(String(req.params.secret)), b = Buffer.from(CB_SECRET);
+  if (!CB_SECRET || a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(403).end();
+  res.sendStatus(200);   // answer first, as PalPluss asks
+  pay.webhook(+req.params.id, req.body).catch(e => console.error('PalPluss webhook error:', e.message));
 });
-app.get('/api/pay/status/:ref', auth, async (req, res) => {   // the page polls this after a deposit
-  const t = db.prepare("select * from txs where ref=? and uid=? and type='deposit'").get(req.params.ref, req.uid); if (!t) return res.status(404).json({ error: 'Not found' });
-  if (t.status === 'pending' && PAY === 'paystack' && Date.now() - (vAt.get(t.ref) || 0) > 8000) {   // webhook late or missed: ask Paystack directly
-    vAt.set(t.ref, Date.now()); try { settleDeposit(t, await paystack.verify(t.ref)); } catch {} }
-  res.json({ status: db.prepare('select status from txs where id=?').get(t.id).status });
+app.get('/api/pay/status/:id', auth, async (req, res) => {   // the page polls this after a deposit
+  const status = await pay.depositStatus(req.uid, req.params.id); status ? res.json({ status }) : res.status(404).json({ error: 'Not found' });
 });
-async function sendPayout(t) {   // t = a withdrawal row; returns the provider reference
-  const u = db.prepare('select name, phone from users where id=?').get(t.uid);
-  if (PAY === 'daraja') return (await daraja.b2c(u.phone, t.amount, t.id)).ConversationID;
-  const ref = 'wd_' + t.id + '_' + crypto.randomBytes(3).toString('hex');
-  db.prepare('update txs set ref=? where id=?').run(ref, t.id);   // saved first so the transfer webhook can find it
-  const rc = await paystack.recipient(u.name, u.phone), d = await paystack.transfer(rc.recipient_code, t.amount, ref);
-  if (d.status === 'otp') throw new Error('PAYOUT_OTP');   // transfer OTP is switched on in the Paystack dashboard
-  return ref;
-}
 // ---- Sign in with Google ----
 async function googleVerify(idToken) {
   const r = await fetch((E.GOOGLE_TOKENINFO_URL || 'https://oauth2.googleapis.com/tokeninfo') + '?id_token=' + encodeURIComponent(idToken)), j = await r.json().catch(() => ({}));
@@ -169,10 +152,8 @@ app.post('/api/ticket', auth, (req, res) => {
 app.get('/api/admin/kyc/:uid', auth, admin, (req, res) => res.json(db.prepare('select id_number, kyc_photo photo from users where id=?').get(+req.params.uid) || {}));
 app.post('/api/admin/kyc', auth, admin, (req, res) => { db.prepare("update users set kyc=? where id=? and kyc='pending'").run(req.body.action === 'approve' ? 'approved' : 'rejected', +req.body.uid); res.json({ ok: true }); });
 app.post('/api/admin/ticket', auth, admin, (req, res) => { db.prepare("update tickets set status='closed' where id=?").run(+req.body.id); res.json({ ok: true }); });
-app.post('/api/admin/withdrawal', auth, admin, async (req, res) => {
-  const t = db.prepare("select * from txs where id=? and type='withdraw' and status='review'").get(+req.body.id); if (!t) return res.status(404).json({ error: 'Not found' });
-  if (req.body.action === 'reject') { db.prepare("update txs set status='rejected' where id=?").run(t.id); add(t.uid, t.amount, 'withdrawal rejected'); pushBal(t.uid); return res.json({ ok: true }); }
-  try { const ref = await sendPayout(t); db.prepare("update txs set status='pending', ref=? where id=?").run(ref, t.id); res.json({ ok: true }); }
+app.post('/api/admin/withdrawal', auth, admin, async (req, res) => {   // approve = pay it now, reject = give the money back to the player's wallet
+  try { const ok = req.body.action === 'reject' ? pay.adminReject(req.body.id) : await pay.adminApprove(req.body.id); ok ? res.json({ ok: true }) : res.status(404).json({ error: 'Not found, or already handled' }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 // ---- Sign up and login with a one-time code sent by SMS or email ----
@@ -257,54 +238,25 @@ app.post('/api/otp/resend', async (req, res) => {
 });
 app.get('/api/me', auth, (req, res) => res.json({ ...db.prepare('select id,name,phone,balance,rating,daily_limit,excluded_until,kyc from users where id=?').get(req.uid), admin: isAdmin(req.uid) }));
 
-// ---- Deposit (M-Pesa STK Push) ----
+// ---- Deposit (M-Pesa STK Push) and withdraw (M-Pesa B2C), both through PalPluss ----
 app.post('/api/deposit', auth, async (req, res) => {
   const amt = Math.floor(+req.body.amount); if (!STAKES) return res.status(403).json({ error: 'Deposits are not open yet' });
   if (!(amt >= 10)) return res.status(400).json({ error: 'Minimum KES 10' });
+  if (amt > 150000) return res.status(400).json({ error: 'Maximum KES 150,000 per deposit' });
   const u0 = db.prepare('select daily_limit dl, excluded_until ex from users where id=?').get(req.uid);
   if (u0.ex && u0.ex > new Date().toISOString()) return res.status(403).json({ error: 'Your account is on a self-exclusion break' });
   if (u0.dl) { const used = db.prepare("select coalesce(sum(amount),0) s from txs where uid=? and type='deposit' and status!='failed' and date(created)=date('now')").get(req.uid).s;
     if (used + amt > u0.dl) return res.status(400).json({ error: 'This would exceed your daily deposit limit of KES ' + u0.dl }); }
-  if (PAY === 'paystack') {   // Paystack sends the M-Pesa prompt; the webhook (or the status check) credits the wallet
-    const u1 = db.prepare('select phone, email from users where id=?').get(req.uid), ref = 'dep_' + req.uid + '_' + Date.now() + '_' + crypto.randomBytes(3).toString('hex');
-    const tx = db.prepare('insert into txs(uid,type,amount,ref) values(?,?,?,?)').run(req.uid, 'deposit', amt, ref);   // saved first so a fast webhook can find it
-    try { const d = await paystack.chargeMpesa(u1.email || u1.phone + '@pay.stakearena.app', u1.phone, amt, ref); return res.json({ ok: true, ref, message: d.display_text || 'Check your phone and enter your M-Pesa PIN' }); }
-    catch (e) { db.prepare("update txs set status='failed' where id=?").run(tx.lastInsertRowid); return res.status(400).json({ error: e.message }); }
-  }
-  try { const r = await daraja.stk(phoneOf(req.uid), amt);
-    db.prepare('insert into txs(uid,type,amount,ref) values(?,?,?,?)').run(req.uid, 'deposit', amt, r.CheckoutRequestID); res.json({ ok: true, ref: r.CheckoutRequestID }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try { const r = await pay.startDeposit(req.uid, amt); r.error ? res.status(400).json({ error: r.error }) : res.json({ ok: true, ref: r.id, message: r.message }); }
+  catch (e) { console.error('Deposit failed:', e); res.status(500).json({ error: 'Could not start the deposit. Please try again.' }); }
 });
-app.post('/api/daraja/stk-callback/:secret', cbAuth, (req, res) => {
-  res.json({ ResultCode: 0, ResultDesc: 'ok' });
-  const cb = req.body?.Body?.stkCallback; if (!cb) return;
-  const t = db.prepare("select * from txs where ref=? and status='pending'").get(cb.CheckoutRequestID); if (!t) return;
-  const paid = Math.round(+cb.CallbackMetadata?.Item?.find(i => i.Name === 'Amount')?.Value);
-  if (cb.ResultCode === 0 && paid !== t.amount) { db.prepare("update txs set status='review' where id=?").run(t.id); db.prepare('insert into flags(note) values(?)').run('Deposit amount mismatch on tx ' + t.id + ': expected ' + t.amount + ', callback said ' + paid); return; }
-  if (cb.ResultCode === 0) { db.prepare("update txs set status='done' where id=?").run(t.id); add(t.uid, t.amount, 'M-Pesa deposit'); pushBal(t.uid); }
-  else db.prepare("update txs set status='failed' where id=?").run(t.id);
-});
-// ---- Withdraw (M-Pesa B2C) ----
-app.post('/api/withdraw', auth, async (req, res) => {
+app.post('/api/withdraw', auth, (req, res) => {   // the wallet is debited at once and the payout is sent straight away (or held for approval if it is large)
   const amt = Math.floor(+req.body.amount);
   if (!(amt >= 50)) return res.status(400).json({ error: 'Minimum KES 50' });
   if (amt > 150000) return res.status(400).json({ error: 'Maximum KES 150,000 per withdrawal' });
-  if (bal(req.uid) < amt) return res.status(400).json({ error: 'Insufficient balance' });
-  add(req.uid, -amt, 'withdrawal');
-  const r = db.prepare('insert into txs(uid,type,amount,ref) values(?,?,?,?)').run(req.uid, 'withdraw', amt, '');
-  if (amt >= REVIEW) { db.prepare("update txs set status='review' where id=?").run(r.lastInsertRowid); pushBal(req.uid); return res.json({ ok: true, review: true }); }
-  try { const ref = await sendPayout({ id: r.lastInsertRowid, uid: req.uid, amount: amt });
-    db.prepare('update txs set ref=? where id=?').run(ref, r.lastInsertRowid); pushBal(req.uid); res.json({ ok: true }); }
-  catch (e) { add(req.uid, amt, 'withdrawal failed, refunded'); db.prepare("update txs set status='failed' where id=?").run(r.lastInsertRowid); pushBal(req.uid); console.error('Payout failed:', e.message); res.status(500).json({ error: e.message === 'PAYOUT_OTP' ? 'Payouts are temporarily unavailable. Please try again later.' : e.message }); }
+  try { const r = pay.createWithdrawal(req.uid, amt); res.json({ ok: true, review: r.review }); }
+  catch (e) { e.user ? res.status(400).json({ error: e.message }) : (console.error('Withdrawal failed:', e), res.status(500).json({ error: 'Could not start the withdrawal. Please try again.' })); }
 });
-app.post('/api/daraja/b2c-result/:secret', cbAuth, (req, res) => {
-  res.json({ ResultCode: 0, ResultDesc: 'ok' });
-  const r = req.body?.Result; if (!r) return;
-  const t = db.prepare("select * from txs where type='withdraw' and ref=? and status='pending'").get(r.ConversationID); if (!t) return;
-  if (r.ResultCode === 0) db.prepare("update txs set status='done' where id=?").run(t.id);
-  else { db.prepare("update txs set status='failed' where id=?").run(t.id); add(t.uid, t.amount, 'withdrawal failed, refunded'); pushBal(t.uid); }
-});
-app.post('/api/daraja/b2c-timeout/:secret', cbAuth, (req, res) => res.json({ ResultCode: 0 }));
 
 // ---- Multiplayer games ----
 const rooms = new Map(), online = new Map(); let rid = 1;
@@ -328,18 +280,19 @@ function ckMoves(b, side, only) {
 }
 const tcParse = tc => { const [m, i] = String(tc || '10+0').split('+').map(Number), ok = m > 0 && m <= 60 && i >= 0 && i <= 60, M = ok ? m : 10, I = ok ? i : 0; return { clock: [M * 6e4, M * 6e4], inc: I * 1e3, tc: M + '+' + I }; };
 const mkCode = () => { let c; do c = crypto.randomBytes(3).toString('hex').toUpperCase(); while ([...rooms.values()].some(r => r.code === c)); return c; };
+const GAME_IDS = ['chess', 'tictactoe', 'ludo', 'checkers', ...BG.names];
 const nextTurn = r => { do r.turn = (r.turn + 1) % r.players.length; while (r.out[r.turn]); };
 const lmov = (L, p) => L.pos[p].map((x, t) => (x < 0 ? L.die === 6 : x + L.die <= 56) ? t : -1).filter(t => t >= 0);
 function pushBal(uid) { const s = online.get(uid); if (s) s.emit('balance', bal(uid)); }
-io.use((s, next) => { try { const p = jwt.verify(s.handshake.auth.token, SECRET); s.uid = p.id; const row = db.prepare('select excluded_until e, tv from users where id=?').get(s.uid); if ((row.tv || 0) !== (p.tv || 0)) throw new Error('stale'); const ex = row.e; if (ex && ex > new Date().toISOString()) return next(new Error('excluded')); next(); } catch { next(new Error('auth')); } });
+io.use((s, next) => { try { const p = jwt.verify(s.handshake.auth.token, SECRET, JWT_OPTS); s.uid = p.id; const row = db.prepare('select excluded_until e, tv, uuid from users where id=?').get(s.uid); if (!sameAccount(row, p)) throw new Error('stale'); const ex = row.e; if (ex && ex > new Date().toISOString()) return next(new Error('excluded')); next(); } catch { next(new Error('auth')); } });
 const lobby = () => [...rooms.values()].filter(r => r.listed && !r.started && r.players.length < r.size).map(r => ({ code: r.code, id: r.id, game: r.game, stake: r.stake, by: r.names[0], n: r.players.length, size: r.size }));
-const view = r => ({ id: r.id, game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
+const view = r => ({ id: r.id, game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
 const TURN = { chess: 120000, checkers: 60000, ludo: 30000, tictactoe: 20000 };   // per-move time limits
-const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + TURN[r.game]; io.to('r' + r.id).emit('state', view(r)); };
+const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); io.to('r' + r.id).emit('state', view(r)); };
 function finish(r, winner, text) {   // winner = user id, or null for a draw (stakes refunded)
   if (r.over) return; r.over = true; r.result = text;
   const pot = r.stake * r.players.length, pay = Math.floor(pot * (1 - FEE)); r.winner = winner; r.pay = pay;
-  if (r.stake) { winner == null ? r.players.forEach(p => add(p, r.stake, 'draw refund')) : add(winner, pay, 'winnings'); r.players.forEach(pushBal); if (winner != null) db.prepare('insert into house(amount) values(?)').run(pot - pay); }
+  if (r.stake) { txn(() => { winner == null ? r.players.forEach(p => add(p, r.stake, 'draw refund')) : add(winner, pay, 'winnings'); if (winner != null) db.prepare('insert into house(amount) values(?)').run(pot - pay); db.prepare('delete from escrow where rid=?').run(r.id); }); r.players.forEach(pushBal); }
   const pair = r.players.length === 2 ? r.players.slice().sort().join('-') : null;
   r.players.forEach(p => { const res = winner == null ? 'draw' : p === winner ? 'win' : 'loss';
     db.prepare('insert into plays(uid,game,stake,result,net,pair) values(?,?,?,?,?,?)').run(p, r.game, r.stake, res, res === 'win' ? pay - r.stake : res === 'loss' ? -r.stake : 0, pair); });
@@ -380,6 +333,7 @@ function begin(r) {   // called when the host starts and everyone is ready
   if (r.game === 'chess') { r.chess = new Chess(); if (!r.clock) { r.clock = [6e5, 6e5]; r.inc = 0; } r.t0 = Date.now(); }
   else if (r.game === 'ludo') r.ludo = { pos: r.players.map(() => [-1, -1, -1, -1]), die: null, last: null, seat: n === 2 ? [0, 2] : [0, 1, 2, 3].slice(0, n) };
   else if (r.game === 'checkers') { r.ck = Array.from({ length: 64 }, (_, i) => ((i >> 3) + (i & 7)) & 1 ? ((i >> 3) < 3 ? 'b' : (i >> 3) > 4 ? 'w' : 0) : 0); r.mustFrom = null; }
+  else if (BG.is(r.game)) r.board = BG.init(r.game);
   else r.board = Array(9).fill('');
 }
 function leave(s) {
@@ -388,7 +342,7 @@ function leave(s) {
   s.leave('r' + r.id);
   if (r.over) return;
   if (!r.started) {            // game not started: refund and remove the player
-    if (r.stake) add(s.uid, r.stake, 'stake refund'); pushBal(s.uid);
+    if (r.stake) txn(() => { add(s.uid, r.stake, 'stake refund'); unhold(r.id, s.uid); }); pushBal(s.uid);
     r.players.splice(i, 1); r.names.splice(i, 1); r.ready.splice(i, 1); r.ready = r.ready.map(() => false);
     if (!r.players.length) rooms.delete(r.id); else send(r);
     return io.emit('lobby', lobby());
@@ -442,7 +396,7 @@ function answer(p, uid, ok) {
   const r = { id: rid++, game: p.game, stake: p.stake, size: p.size, out: [], code: mkCode(), listed: false, started: false, ready: p.players.map(() => true),
     players: [...p.players], names: p.players.map(u => uinfo(u).name), turn: 0, over: false };
   rooms.set(r.id, r);
-  p.players.forEach(u => { add(u, -p.stake, 'stake'); const ps = online.get(u); ps.join('r' + r.id); ps.rid = r.id; ps.pid = null; ps.emit('queue', false); pushBal(u); });
+  p.players.forEach(u => { hold(r.id, u, p.stake); const ps = online.get(u); ps.join('r' + r.id); ps.rid = r.id; ps.pid = null; ps.emit('queue', false); pushBal(u); });
   begin(r); send(r);   // both accepted, so no ready check: the game starts immediately
 }
 // ---- Tournaments: knockout brackets with an entry fee. The champion gets the pool minus the platform fee (TOURNAMENT_FEE, 10%). ----
@@ -480,9 +434,9 @@ function tMatchDone(r, winner) {   // called from finish() when a tournament gam
   db.prepare("update t_matches set winner=?, status='done' where id=?").run(winner, m.id);
   if (m.round === t.rounds) {   // the final: pay the champion
     const pool = db.prepare('select pool from tournaments where id=?').get(t.id).pool, prize = tPrize(pool);
-    db.prepare("update tournaments set status='done', winner=? where id=?").run(winner, t.id);
-    if (prize) add(winner, prize, 'tournament prize');
-    if (pool - prize) db.prepare('insert into house(amount) values(?)').run(pool - prize);
+    txn(() => { db.prepare("update tournaments set status='done', winner=? where id=?").run(winner, t.id);
+      if (prize) add(winner, prize, 'tournament prize');
+      if (pool - prize) db.prepare('insert into house(amount) values(?)').run(pool - prize); });
     pushBal(winner); r.tnote = tn(winner) + ' wins ' + t.name + (prize ? ' and KES ' + prize : '') + '!';
   } else {   // move the winner up, and start the next match as soon as all of its feeder matches are decided
     const pi = Math.floor(m.idx / t.g), parent = db.prepare('select * from t_matches where tid=? and round=? and idx=?').get(t.id, m.round + 1, pi);
@@ -497,22 +451,21 @@ function joinT(tid, uid) {
   const ps = tPlayers(tid); if (ps.includes(uid)) return 'You are already in this tournament'; if (ps.length >= t.size) return 'This tournament is full';
   if (excluded(uid)) return 'Your account is on a self-exclusion break';
   if (t.fee && bal(uid) < t.fee) return 'Insufficient balance. The entry fee is KES ' + t.fee;
-  if (t.fee) add(uid, -t.fee, 'tournament entry');
-  db.prepare('insert into t_players(tid,uid) values(?,?)').run(tid, uid); db.prepare('update tournaments set pool=pool+? where id=?').run(t.fee, tid); pushBal(uid);
+  txn(() => { if (t.fee) add(uid, -t.fee, 'tournament entry'); db.prepare('insert into t_players(tid,uid) values(?,?)').run(tid, uid); db.prepare('update tournaments set pool=pool+? where id=?').run(t.fee, tid); }); pushBal(uid);
   if (ps.length + 1 === t.size) startTournament(db.prepare('select * from tournaments where id=?').get(tid));
   tPush(tid); return null;
 }
 function leaveT(tid, uid) {
   const t = db.prepare('select * from tournaments where id=?').get(tid); if (!t || t.status !== 'open') return 'You can only leave before the tournament starts';
   if (!tPlayers(tid).includes(uid)) return 'You are not in this tournament';
-  db.prepare('delete from t_players where tid=? and uid=?').run(tid, uid);
-  if (t.fee) { add(uid, t.fee, 'tournament entry refund'); db.prepare('update tournaments set pool=pool-? where id=?').run(t.fee, tid); }
+  txn(() => { db.prepare('delete from t_players where tid=? and uid=?').run(tid, uid);
+    if (t.fee) { add(uid, t.fee, 'tournament entry refund'); db.prepare('update tournaments set pool=pool-? where id=?').run(t.fee, tid); } });
   pushBal(uid); tPush(tid); return null;
 }
 function cancelT(tid) {
   const t = db.prepare('select * from tournaments where id=?').get(tid); if (!t || t.status !== 'open') return 'Only a tournament that has not started can be cancelled';
-  tPlayers(tid).forEach(u => { if (t.fee) { add(u, t.fee, 'tournament entry refund'); pushBal(u); } });
-  db.prepare("update tournaments set status='cancelled', pool=0 where id=?").run(tid); tPush(tid); return null;
+  const ps = tPlayers(tid); txn(() => { ps.forEach(u => { if (t.fee) add(u, t.fee, 'tournament entry refund'); }); db.prepare("update tournaments set status='cancelled', pool=0 where id=?").run(tid); });
+  ps.forEach(pushBal); tPush(tid); return null;
 }
 app.get('/api/tournaments', auth, (req, res) => {
   const rows = db.prepare("select t.*, u.name cname, w.name wname from tournaments t join users u on u.id=t.uid left join users w on w.id=t.winner where t.status in ('open','running') or (t.status='done' and t.started > datetime('now','-3 days')) order by case t.status when 'open' then 0 when 'running' then 1 else 2 end, t.id desc limit 40").all();
@@ -565,13 +518,13 @@ io.on('connection', s => {
   const find = code => [...rooms.values()].find(r => r.code === String(code || '').trim().toUpperCase() && !r.started && r.players.length < r.size);
   s.on('create', ({ game, stake, size, listed, tc }, cb) => {
     stake = Math.floor(+stake) || 0;
-    if (!['chess', 'tictactoe', 'ludo', 'checkers'].includes(game) || stake < 0) return;
+    if (!GAME_IDS.includes(game) || stake < 0) return;
     if (busy()) return cb?.({ error: 'Finish your current game first' });
     if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet. Play a free table.' });
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance' });
-    add(uid, -stake, 'stake');   // host's stake is held in escrow
     const r = { id: rid++, game, stake, size: game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+size) || 4)) : 2, out: [], ...(game === 'chess' && tcParse(tc)), code: mkCode(), listed: !!listed, started: false, ready: [false], players: [uid], names: [me], turn: 0, over: false };
     const prev = rooms.get(s.rid); if (prev && prev.over) s.to('r' + prev.id).emit('rematch', { code: r.code, by: me, stake });
+    hold(r.id, uid, stake);   // the host's stake is held in escrow
     rooms.set(r.id, r); s.join('r' + r.id); s.rid = r.id; pushBal(uid); cb?.({ code: r.code }); io.emit('lobby', lobby()); send(r);
   });
   s.on('peek', ({ code }, cb) => {   // show a table's rules before the player agrees to stake
@@ -582,7 +535,7 @@ io.on('connection', s => {
     const r = find(code); if (!r || r.players.includes(uid)) return cb?.({ error: 'No open table with that code' });
     if (busy()) return cb?.({ error: 'Finish your current game first' });
     if (r.stake && bal(uid) < r.stake) return cb?.({ error: 'Insufficient balance. This table needs KES ' + r.stake });
-    add(uid, -r.stake, 'stake'); r.players.push(uid); r.names.push(me); r.ready = r.players.map(() => false);
+    hold(r.id, uid, r.stake); r.players.push(uid); r.names.push(me); r.ready = r.players.map(() => false);
     s.join('r' + r.id); s.rid = r.id; pushBal(uid); cb?.({ ok: true }); io.emit('lobby', lobby()); send(r);
   });
   s.on('ready', v => { const r = rooms.get(s.rid); if (!r || r.started) return; r.ready[r.players.indexOf(uid)] = !!v; send(r); });
@@ -617,6 +570,12 @@ io.on('connection', s => {
         if (!b.some(x => x && ckSide(x) === o) || !ckMoves(b, o).length) return finish(r, uid, me + ' wins'); }
       return send(r);
     }
+    if (BG.is(r.game)) {   // Connect Four, Gomoku, Reversi: rules live in boardgames.js
+      const t = BG.play(r.game, r.board, r.turn, m); if (!t) return;
+      r.board = t.board; r.lm = t.lm; r.note = t.note ? r.names[r.turn] + ' ' + t.note : null;
+      if (t.over) { r.line = t.over.line; const w = t.over.winner; r.turn = t.next; return finish(r, w == null ? null : r.players[w], w == null ? t.over.text : r.names[w] + ' wins (' + t.over.text + ')'); }
+      r.turn = t.next; return send(r);
+    }
     if (r.game === 'chess') {
       try { r.chess.move({ from: m.from, to: m.to, promotion: 'q' }); } catch { return; }
       { const now = Date.now(); r.clock[r.turn] += r.inc - (now - r.t0); r.t0 = now; }
@@ -649,7 +608,7 @@ io.on('connection', s => {
   });
   s.on('find', ({ game, stake, size }, cb) => {
     stake = Math.floor(+stake) || 0; const n = game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+size) || 2)) : 2;
-    if (!['chess', 'tictactoe', 'ludo', 'checkers'].includes(game) || stake < 0) return;
+    if (!GAME_IDS.includes(game) || stake < 0) return;
     if (busy() || s.pid) return cb?.({ error: 'Finish your current game first' });
     if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet. Play a free game.' });
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance. You need KES ' + stake });
@@ -694,5 +653,10 @@ io.on('connection', s => {
 });
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: 'Something went wrong. Please try again.' }); });
 process.on('unhandledRejection', e => console.error('Unhandled rejection:', e));
-srv.listen(E.PORT || 3000, () => console.log('StakeArena running on port ' + (E.PORT || 3000) + (STAKES ? '' : ' (free play only)')));
-['SIGTERM', 'SIGINT'].forEach(sig => process.on(sig, () => { srv.close(() => { db.close(); process.exit(0); }); setTimeout(() => process.exit(0), 5000).unref(); }));
+srv.listen(E.PORT || 3000, () => { console.log('GameArena running on port ' + (E.PORT || 3000) + (STAKES ? '' : ' (free play only)')); pay.start(); store.startBackups(db); });
+let closing = false;   // a deploy sends SIGTERM: stop taking requests, save one last off-site snapshot, then exit
+['SIGTERM', 'SIGINT'].forEach(sig => process.on(sig, async () => {
+  if (closing) return; closing = true; pay.stop(); srv.close(); setTimeout(() => process.exit(0), 25000).unref();
+  try { await store.snapshotNow(db, 'shutdown'); } catch (e) { console.error('Shutdown backup failed:', e.message); }
+  try { db.close(); } catch {} process.exit(0);
+}));
