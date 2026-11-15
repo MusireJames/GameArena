@@ -209,6 +209,17 @@ test('a game that was not made live cannot be watched', async () => {
     assert.equal(list.length, 0, 'it is not listed'); const id = g.last.a.id; assert.match((await emit(cc, 'spectate', { id })).error, /not live/); cc.close();
   } finally { await g.done(); }
 });
+test('tournaments: the creator chooses live or not live, and everyone can see it before joining', async () => {
+  const g = await twoPlayers(3978, '', 'chess');
+  try {
+    const tk = await g.reg('0744444444', 'D'), call = async (m, p, b) => (await fetch(g.url + '/api/' + p, { method: m, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tk }, body: b && JSON.stringify(b) })).json();
+    await call('POST', 'tournaments', { name: 'Live cup', game: 'connect4', size: 4, fee: 0, live: true, enter: false });
+    await call('POST', 'tournaments', { name: 'Quiet cup', game: 'reversi', size: 4, fee: 0, enter: false });
+    const l = await call('GET', 'tournaments'), a = l.find(t => t.name === 'Live cup'), b = l.find(t => t.name === 'Quiet cup');
+    assert.ok(a && b, 'new games are allowed in tournaments'); assert.equal(a.live, true); assert.equal(b.live, false, 'not live unless the creator ticks it');
+    assert.equal((await call('GET', 'tournaments/' + a.id)).live, true); assert.equal((await call('GET', 'tournaments/' + b.id)).live, false);
+  } finally { await g.done(); }
+});
 test('Google sign-in: new players add phone and age, returning players go straight in', async () => {
   const gm = http.createServer((req, res) => { const tk = decodeURIComponent(req.url.split('id_token=')[1] || ''); res.setHeader('Content-Type', 'application/json');
     if (tk === 'good') return res.end(JSON.stringify({ aud: 'cid', email: 'g@test.com', email_verified: 'true', name: 'Gina' }));
