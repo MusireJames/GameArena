@@ -220,6 +220,21 @@ test('tournaments: the creator chooses live or not live, and everyone can see it
     assert.equal((await call('GET', 'tournaments/' + a.id)).live, true); assert.equal((await call('GET', 'tournaments/' + b.id)).live, false);
   } finally { await g.done(); }
 });
+test('public tables: several can be open, anyone can accept without a code, and the host is told', async () => {
+  const g = await twoPlayers(3977, '', 'connect4', false);
+  try {
+    const mk = async (phone, n) => { const c = io(g.url, { auth: { token: await g.reg(phone, n) } }), x = { c, lobby: [], st: null, notes: [] }; c.on('lobby', l => x.lobby = l); c.on('state', s => x.st = s); c.on('challenge', n2 => x.notes.push(n2.by)); return x; };
+    const C = await mk('0744444444', 'C'), D = await mk('0755555555', 'D'); await sleep(500);
+    assert.ok((await emit(C.c, 'open', { game: 'connect4', stake: 0, live: true })).ok); assert.ok((await emit(C.c, 'open', { game: 'reversi', stake: 0 })).ok); await sleep(300);
+    assert.equal(D.lobby.filter(t => t.open).length, 2, 'both public tables are listed for everyone'); const live = D.lobby.find(t => t.game === 'connect4'); assert.equal(live.live, true); assert.equal(live.code, null, 'no code is needed or shown'); assert.equal(live.hid > 0, true);
+    assert.match((await emit(C.c, 'accept', { id: live.id })).error, /own table/);
+    assert.ok((await emit(D.c, 'accept', { id: live.id })).ok); await sleep(400);
+    assert.deepEqual(C.notes, ['D'], 'the host is told someone accepted'); assert.equal(C.st.started, true); assert.equal(D.st.started, true); assert.deepEqual(C.st.names, ['C', 'D']); assert.equal(C.st.live, true);
+    assert.equal(D.lobby.filter(t => t.open).length, 0, "the host's other table closed when he started a game");
+    const E2 = await mk('0766666666', 'E'); await sleep(300); assert.match((await emit(E2.c, 'accept', { id: live.id })).error, /got there first|closed/, 'a table cannot be accepted twice');
+    [C, D, E2].forEach(x => x.c.close());
+  } finally { await g.done(); }
+});
 test('Google sign-in: new players add phone and age, returning players go straight in', async () => {
   const gm = http.createServer((req, res) => { const tk = decodeURIComponent(req.url.split('id_token=')[1] || ''); res.setHeader('Content-Type', 'application/json');
     if (tk === 'good') return res.end(JSON.stringify({ aud: 'cid', email: 'g@test.com', email_verified: 'true', name: 'Gina' }));
