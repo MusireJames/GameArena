@@ -193,6 +193,20 @@ test('withdrawal: PalPluss paid it after we refunded it: flagged for a human', a
   const w = P.createWithdrawal(1, 400); await until(() => tx(w.id).status === 'pending'); const pid = M.byRef('WD-' + w.id).transactionId;
   M.set(pid, 'FAILED'); await P.webhook(w.id, {}); assert.equal(balance(1), 1000); M.set(pid, 'SUCCESS'); await P.webhook(w.id, {}); assert.ok(flags().some(f => /already refunded/.test(f)));
 });
+// ---------------- FEES PAID BY THE PLAYER ----------------
+test('fees: a deposit charges amount + fee at M-Pesa, credits only the amount, and a wrong total goes to review', async () => {
+  const r = await P.startDeposit(1, 500, null, 3); assert.equal(M.calls.find(x => x.path === '/payments/stk').body.amount, 503, 'the player is asked to pay the fee too');
+  const pid = M.byRef('D' + r.id).transactionId; M.set(pid, 'SUCCESS'); assert.equal(await P.webhook(r.id, { transaction: { id: pid } }), 'done'); assert.equal(balance(1), 1500, 'the wallet gets exactly what the player asked for'); checkLedger();
+  const r2 = await P.startDeposit(2, 500, null, 3); const p2 = M.byRef('D' + r2.id).transactionId; M.txs.get(p2).amount = 500; M.set(p2, 'SUCCESS');
+  assert.equal(await P.webhook(r2.id, { transaction: { id: p2 } }), 'review', 'paying only 500 when 503 was due is not credited'); assert.equal(balance(2), 1000);
+});
+test('fees: a withdrawal debits amount + fee, sends only the amount, and a failed one refunds the full debit', async () => {
+  const w = P.createWithdrawal(1, 400, null, false, 18); assert.equal(balance(1), 1000 - 418, 'wallet pays the payout and the fee');
+  await until(() => tx(w.id).status === 'pending'); assert.equal(M.calls.find(x => x.path === '/b2c/payouts').body.amount, 400, 'the phone receives exactly the requested amount');
+  const pid = M.byRef('WD-' + w.id).transactionId; M.set(pid, 'FAILED'); await P.webhook(w.id, { transaction: { id: pid } });
+  assert.equal(tx(w.id).status, 'failed'); assert.equal(balance(1), 1000, 'fee and amount both come back'); checkLedger();
+  assert.throws(() => P.createWithdrawal(1, 995, null, false, 18), /Insufficient/, 'the fee counts toward the balance check');
+});
 test('webhook: unknown transaction ids and PalPluss outages are handled quietly', async () => {
   assert.equal(await P.webhook(9999, {}), 'unknown'); const r = await P.startDeposit(1, 100); M.getFail = 500;
   assert.equal(await P.webhook(r.id, { transaction: { id: M.byRef('D' + r.id).transactionId } }), 'later'); assert.equal(balance(1), 1000);
