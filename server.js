@@ -302,7 +302,7 @@ const nextTurn = r => { do r.turn = (r.turn + 1) % r.players.length; while (r.ou
 const lmov = (L, p) => L.pos[p].map((x, t) => (x < 0 ? L.die === 6 : x + L.die <= 56) ? t : -1).filter(t => t >= 0);
 function pushBal(uid) { const s = online.get(uid); if (s) s.emit('balance', bal(uid)); }
 io.use((s, next) => { try { const p = jwt.verify(s.handshake.auth.token, SECRET, JWT_OPTS); s.uid = p.id; const row = db.prepare('select excluded_until e, tv, uuid from users where id=?').get(s.uid); if (!sameAccount(row, p)) throw new Error('stale'); const ex = row.e; if (ex && ex > new Date().toISOString()) return next(new Error('excluded')); next(); } catch { next(new Error('auth')); } });
-const lobby = () => [...rooms.values()].filter(r => r.listed && !r.started && r.players.length < r.size).map(r => ({ code: r.code, id: r.id, game: r.game, stake: r.stake, by: r.names[0], n: r.players.length, size: r.size }));
+const lobby = () => [...rooms.values()].filter(r => r.listed && !r.started && r.players.length < r.size).map(r => ({ code: r.open ? null : r.code, id: r.id, game: r.game, stake: r.stake, by: r.names[0], hid: r.players[0], n: r.players.length, size: r.size, open: !!r.open, live: !!r.live, tc: r.tc || null }));
 const specN = id => io.sockets.adapter.rooms.get('v' + id)?.size || 0;   // how many people are watching a game
 const liveList = () => [...rooms.values()].filter(r => r.live && r.started && !r.over).map(r => ({ id: r.id, game: r.game, stake: r.stake, names: r.names, w: specN(r.id), t: !!r.tid }));
 let liveT = null; const liveTick = () => { if (liveT) return; liveT = setTimeout(() => { liveT = null; io.emit('live', liveList()); }, 300); };   // tell everyone, at most a few times a second
@@ -350,6 +350,7 @@ setInterval(() => rooms.forEach(r => {
 }), 1000);
 function begin(r) {   // called when the host starts and everyone is ready
   r.started = true; const n = r.players.length; liveTick();
+  for (const u of r.players) { closeOpen(u, 'Your other open tables were closed because you started a game. Stakes returned.'); const ps = online.get(u); if (ps && ps.spec) { ps.leave('v' + ps.spec); ps.spec = null; } }
   if (r.game === 'chess') { r.chess = new Chess(); if (!r.clock) { r.clock = [6e5, 6e5]; r.inc = 0; } r.t0 = Date.now(); }
   else if (r.game === 'ludo') r.ludo = { pos: r.players.map(() => [-1, -1, -1, -1]), die: null, last: null, seat: n === 2 ? [0, 2] : [0, 1, 2, 3].slice(0, n) };
   else if (r.game === 'checkers') { r.ck = Array.from({ length: 64 }, (_, i) => ((i >> 3) + (i & 7)) & 1 ? ((i >> 3) < 3 ? 'b' : (i >> 3) > 4 ? 'w' : 0) : 0); r.mustFrom = null; }
@@ -369,6 +370,15 @@ function leave(s) {
   }
   forfeit(r, i);
 }
+// ---- Public tables ("challenges"): anyone can accept without a code. A player may keep several open at once; they close when he starts any game. ----
+const MAX_OPEN = 5, OPEN_MINUTES = +E.OPEN_TABLE_MINUTES || 30;
+function closeTable(r, why) {   // removes an unstarted public table and returns the host's stake
+  if (!rooms.get(r.id) || r.started) return; const h = r.players[0];
+  if (r.stake) { txn(() => { add(h, r.stake, 'stake refund'); unhold(r.id, h); }); pushBal(h); }
+  rooms.delete(r.id); const hs = online.get(h); if (hs) { hs.leave('r' + r.id); if (why) hs.emit('note', why); } io.emit('lobby', lobby());
+}
+const closeOpen = (uid, why) => { for (const r of [...rooms.values()]) if (r.open && !r.started && r.players[0] === uid) closeTable(r, why); };
+setInterval(() => { const now = Date.now(); for (const r of [...rooms.values()]) if (r.open && !r.started && now - r.born > OPEN_MINUTES * 60000) closeTable(r, 'Your public table expired after ' + OPEN_MINUTES + ' minutes with no challenger. Your stake was returned.'); }, 30000);
 // ---- Quick match: pair players who are searching for the same game and stake; both must accept ----
 const queue = new Map(), proposals = new Map(); let pid = 1;
 const qkey = (g, st, n) => g + ':' + st + ':' + n;
@@ -535,7 +545,7 @@ io.on('connection', s => {
   const back = [...rooms.values()].find(r => r.started && !r.over && r.players.includes(uid));   // reconnect to a game in progress
   if (back) { s.join('r' + back.id); s.rid = back.id; if (back.away) delete back.away[uid]; if (back.seen) back.seen[uid] = true; send(back); }
   const busy = () => { const c = rooms.get(s.rid); return c && !c.over; };
-  const find = code => [...rooms.values()].find(r => r.code === String(code || '').trim().toUpperCase() && !r.started && r.players.length < r.size);
+  const find = code => [...rooms.values()].find(r => !r.open && r.code === String(code || '').trim().toUpperCase() && !r.started && r.players.length < r.size);
   s.on('create', ({ game, stake, size, listed, tc, live }, cb) => {
     stake = Math.floor(+stake) || 0;
     if (!GAME_IDS.includes(game) || stake < 0) return;
@@ -566,6 +576,27 @@ io.on('connection', s => {
     if (r.stake && bal(uid) < r.stake) return cb?.({ error: 'Insufficient balance. This table needs KES ' + r.stake });
     hold(r.id, uid, r.stake); r.players.push(uid); r.names.push(me); r.ready = r.players.map(() => false);
     s.join('r' + r.id); s.rid = r.id; pushBal(uid); cb?.({ ok: true }); io.emit('lobby', lobby()); send(r);
+  });
+  s.on('open', ({ game, stake, tc, live } = {}, cb) => {   // create a public table and wait for a challenger
+    stake = Math.floor(+stake) || 0;
+    if (!GAME_IDS.includes(game) || stake < 0) return cb?.({ error: 'Pick a game' });
+    if (busy()) return cb?.({ error: 'Finish your current game first' });
+    if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet. Play a free table.' });
+    if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance' });
+    if ([...rooms.values()].filter(x => x.open && !x.started && x.players[0] === uid).length >= MAX_OPEN) return cb?.({ error: 'You can have up to ' + MAX_OPEN + ' open tables at once' });
+    const r = { id: rid++, game, stake, size: 2, out: [], ...(game === 'chess' && tcParse(tc)), code: mkCode(), listed: true, open: true, live: !!live, started: false, ready: [true], players: [uid], names: [me], turn: 0, over: false, born: Date.now() };
+    hold(r.id, uid, stake); rooms.set(r.id, r); s.join('r' + r.id); pushBal(uid); io.emit('lobby', lobby()); cb?.({ ok: true, id: r.id });   // the host is not pulled into a game screen: he can keep browsing and open more tables
+  });
+  s.on('cancelTable', ({ id } = {}, cb) => { const r = rooms.get(Math.floor(+id)); if (!r || !r.open || r.started || r.players[0] !== uid) return cb?.({ error: 'That table is gone' }); closeTable(r); cb?.({ ok: true }); });
+  s.on('accept', ({ id } = {}, cb) => {   // accept a challenge: both players stake and the game starts at once
+    const r = rooms.get(Math.floor(+id)); if (!r || !r.open || r.started || r.players.length >= 2) return cb?.({ error: 'Someone else got there first, or the table was closed' });
+    const h = r.players[0]; if (h === uid) return cb?.({ error: 'That is your own table' });
+    if (busy()) return cb?.({ error: 'Finish your current game first' });
+    const hs0 = online.get(h), hc = hs0 && rooms.get(hs0.rid); if (!hs0 || (hc && !hc.over)) return cb?.({ error: 'That player is busy or offline right now' });
+    if (r.stake && bal(uid) < r.stake) return cb?.({ error: 'Insufficient balance. This table needs KES ' + r.stake });
+    hold(r.id, uid, r.stake); r.players.push(uid); r.names.push(me); r.ready = [true, true]; r.open = false;
+    s.join('r' + r.id); s.rid = r.id; const hs = online.get(h); hs.join('r' + r.id); hs.rid = r.id;
+    pushBal(uid); begin(r); hs.emit('challenge', { by: me }); io.emit('lobby', lobby()); send(r); cb?.({ ok: true });
   });
   s.on('ready', v => { const r = rooms.get(s.rid); if (!r || r.started) return; r.ready[r.players.indexOf(uid)] = !!v; send(r); });
   s.on('start', () => {
@@ -676,7 +707,8 @@ io.on('connection', s => {
   s.on('disconnect', () => {
     if (s.spec) liveTick();
     const cur = online.get(uid); if (cur === s) online.delete(uid); else if (cur) return;
-    io.emit('online', online.size); unq(uid); [...proposals.values()].filter(p => p.players.includes(uid)).forEach(p => cancelProposal(p, uid));
+    io.emit('online', online.size); unq(uid); if (!online.has(uid)) setTimeout(() => { if (!online.has(uid)) closeOpen(uid); }, 30000);   // a host who disappears does not leave dead tables behind
+ [...proposals.values()].filter(p => p.players.includes(uid)).forEach(p => cancelProposal(p, uid));
     const r = rooms.get(s.rid);
     if (r && r.started && !r.over) { (r.away = r.away || {})[uid] = Date.now(); send(r); } else leave(s);   // 60s to reconnect mid-game
   });
