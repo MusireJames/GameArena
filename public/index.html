@@ -169,8 +169,8 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
     <div class="f hide" id="f-tc"><label>Time control</label><select id="tc"><option value="3+2">Blitz 3+2</option><option value="5+0">Blitz 5+0</option><option value="10+0" selected>Rapid 10+0</option><option value="15+10">Rapid 15+10</option></select></div>
    </div>
    <p id="lrule" class="note hide">Ludo rules: a six or capturing a piece gives you another roll. Catch-up rule: if an opponent has a piece out and you have none, you are guaranteed a six within 2 rolls.</p>
-   <div class="btns" style="margin-top:24px"><button data-find onclick="create()">Create private table</button><button data-find class="pri" onclick="find()">Find opponent</button></div>
-   <label class="chk"><input type="checkbox" id="pub"> List my table publicly</label>
+   <div class="btns" style="margin-top:24px"><button data-find class="pri" onclick="openTable()">Create public table</button><button data-find onclick="create()">Create private table</button><button data-find onclick="find()">Find opponent</button></div>
+   <p class="note" style="margin-top:8px"><b>Public table:</b> shows in Public tables so anyone can accept your challenge, no code needed. You can open several and keep browsing: you are told when someone accepts. <b>Private table:</b> only people with your code can join.</p>
    <label class="chk"><input type="checkbox" id="live"> <span class="lvdot"></span> Go live: let anyone watch this game</label><p class="note" style="margin-top:4px">Watchers see the board, player names and the stake. They cannot move or see your chat.</p></div></div>
   <div><div class="card livecard hide" id="livecard"><h2><span class="lvdot"></span>Live now</h2><div id="livel"></div></div>
    <div class="card"><h2>Join with a code</h2><div class="row nw"><input id="code" placeholder="Table code" style="text-transform:uppercase"><button class="pri" onclick="peek($('code').value)">Find</button></div><div id="rules" class="hide" style="margin-top:20px"></div></div>
@@ -307,7 +307,10 @@ async function start(){me=await api('me');if(!me.id){localStorage.removeItem('t'
  $('auth').classList.add('hide');$('app').classList.remove('hide');$('top').classList.remove('hide');$('nav').classList.remove('hide');$('who').textContent=me.name+' · '+me.rating;if(me.admin)$('who').insertAdjacentHTML('afterend','<a href="/admin.html" style="color:#fff">Admin</a>');tiles();side();prof();tOpts();
  sock=io({auth:{token:tok}});
  sock.on('balance',b=>{setBal(b);side()});
- sock.on('lobby',l=>$('rooms').innerHTML=l.map(r=>`<div class="item"><div><b>${GN[r.game]}</b><span class="tag">${r.stake?'KES '+r.stake:'FREE'}</span><span class="tag">${r.n}/${r.size}</span><div class="mute" style="font-size:13px">Host: ${esc(r.by)}</div></div><button class="pri" onclick="peek('${r.code}')">View</button></div>`).join('')||'<div class="mute">No public tables right now. Create one or enter a code.</div>');
+sock.on('lobby',l=>{LB=l;$('rooms').innerHTML=l.map(r=>{const mine=!!me&&r.hid==me.id,tags=`<span class="tag">${r.stake?'KES '+r.stake:'FREE'}</span>${r.live?'<span class="livetag" style="margin:0 0 0 6px"><i></i>LIVE</span>':''}${r.tc?`<span class="tag">${r.tc}</span>`:''}`;
+  return `<div class="item"><div><b>${GN[r.game]}</b>${tags}<div class="mute" style="font-size:13px">${mine?'Your table · waiting for a challenger…':'Challenge from '+esc(r.by)}</div></div>${r.open?(mine?`<button onclick="cancelTable(${r.id})">Cancel</button>`:`<button class="pri" onclick="accept(${r.id})">Accept challenge</button>`):`<button class="pri" onclick="peek('${r.code}')">View</button>`}</div>`}).join('')||'<div class="mute">No public tables right now. Create one and wait for a challenger.</div>'});
+ sock.on('challenge',c=>toast(c.by+' accepted your challenge. Your game is starting!'));
+ sock.on('note',t=>toast(t));
  sock.on('chat',m=>{$('msgs').insertAdjacentHTML('beforeend',`<div><b>${esc(m.n)}:</b> ${esc(m.m)}</div>`);$('msgs').scrollTop=1e9});
  sock.on('rematch',r=>{rm=r;toast(r.by+' wants a rematch');if(S)draw(S)});
  sock.on('connect_error',e=>toast(e.message=='excluded'?'Your account is on a self-exclusion break':'Connection problem'));
@@ -324,7 +327,11 @@ async function start(){me=await api('me');if(!me.id){localStorage.removeItem('t'
  sock.on('tmatch',m=>{$('tm').dataset.room=m.room;$('tmi').innerHTML=`<b>${esc(m.tname)}</b><div class="mute" style="margin:8px 0">${m.round==m.rounds?'Final':'Round '+m.round+' of '+m.rounds} · ${GN[m.game]}</div><div>${m.names.map(n=>esc(n)).join(' vs ')}</div><div class="note">Step in within 3 minutes or you forfeit the match.</div>`;$('tm').classList.remove('hide')});
  sock.on('state',draw);
  sock.on('live',l=>{liveL=l;liveRender()})}
-const create=()=>{sel=null;rm=null;sock.emit('create',{game:G,stake:$('stake').value,size:$('sz').value,tc:$('tc').value,listed:$('pub').checked,live:$('live').checked},r=>toast(r?.error||'Table created. Share code '+r.code))};
+const openTable=()=>sock.emit('open',{game:G,stake:$('stake').value,tc:$('tc').value,live:$('live').checked},r=>toast(r?.error||'Your public table is open. You will be told when someone accepts.'));
+let LB=[];
+const accept=id=>{const t=LB.find(x=>x.id==id);if(!t)return toast('That table is gone');if(!confirm('Accept '+t.by+'\'s challenge?\n\n'+GN[t.game]+' · '+(t.stake?'KES '+t.stake+' stake (taken from your wallet now). Winner takes the pot minus the platform fee.':'Free game')+'\n'+(t.live?'This game is LIVE: anyone online can watch.':'This game is not live.')))return;sel=null;rm=null;sock.emit('accept',{id},r=>{if(r?.error)toast(r.error)})};
+const cancelTable=id=>sock.emit('cancelTable',{id},r=>toast(r?.error||'Table cancelled. Your stake was returned.'));
+const create=()=>{sel=null;rm=null;sock.emit('create',{game:G,stake:$('stake').value,size:$('sz').value,tc:$('tc').value,listed:false,live:$('live').checked},r=>toast(r?.error||'Table created. Share code '+r.code))};
 function peek(code){code=String(code||'').trim().toUpperCase();$('code').value=code;
  sock.emit('peek',{code},r=>{if(r.error){$('rules').classList.add('hide');return toast(r.error)}
   $('rules').classList.remove('hide');
