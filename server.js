@@ -1,6 +1,6 @@
 require('dotenv').config(); const crypto = require('crypto');
 const express = require('express'), http = require('http'), { Server } = require('socket.io'), Database = require('better-sqlite3'),
-  bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken'), { Chess } = require('chess.js'), messaging = require('./messaging'), pp = require('./palpluss'), createPayments = require('./payments'), store = require('./store'), BG = require('./boardgames');
+  bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken'), { Chess } = require('chess.js'), messaging = require('./messaging'), pp = require('./palpluss'), createPayments = require('./payments'), store = require('./store'), BG = require('./boardgames'), FEES = require('./fees');
 const E = process.env, FEE = +E.PLATFORM_FEE || 0.1;
 const PROD = E.NODE_ENV === 'production' || !!E.RENDER || E.FORCE_PRODUCTION === '1', STAKES = E.STAKES_ENABLED !== '0';   // Render counts as production even if NODE_ENV was forgotten
 // There is NO public default secret: a secret that is known to everyone lets anyone forge a login as any player.
@@ -241,6 +241,11 @@ app.post('/api/otp/resend', async (req, res) => {
 app.get('/api/me', auth, (req, res) => res.json({ ...db.prepare('select id,name,phone,balance,rating,daily_limit,excluded_until,kyc from users where id=?').get(req.uid), admin: isAdmin(req.uid) }));
 
 // ---- Deposit (M-Pesa STK Push) and withdraw (M-Pesa B2C), both through PalPluss ----
+app.get('/api/quote', (req, res) => {   // what a deposit or withdrawal of this amount costs the player (PalPluss fees are paid by the player)
+  const a = Math.floor(+req.query.amount); if (!(a > 0)) return res.json({});
+  const df = FEES.depositFee(a), wf = FEES.b2cFee(a);
+  res.json({ deposit: { fee: df, pay: a + df, receive: a }, withdraw: wf == null ? null : { fee: wf, debit: a + wf, receive: a } });
+});
 app.post('/api/deposit', auth, async (req, res) => {
   const amt = Math.floor(+req.body.amount); if (!STAKES) return res.status(403).json({ error: 'Deposits are not open yet' });
   if (!(amt >= 10)) return res.status(400).json({ error: 'Minimum KES 10' });
@@ -250,13 +255,13 @@ app.post('/api/deposit', auth, async (req, res) => {
   if (u0.dl) { const used = db.prepare("select coalesce(sum(amount),0) s from txs where uid=? and type='deposit' and status!='failed' and date(created)=date('now')").get(req.uid).s;
     if (used + amt > u0.dl) return res.status(400).json({ error: 'This would exceed your daily deposit limit of KES ' + u0.dl }); }
   let ph = null; if (req.body.phone) { ph = kePhone(req.body.phone); if (!ph) return res.status(400).json({ error: 'Enter a valid Safaricom number, for example 0712345678' }); }
-  try { const r = await pay.startDeposit(req.uid, amt, ph); r.error ? res.status(400).json({ error: r.error }) : res.json({ ok: true, ref: r.id, message: r.message }); }
+  try { const r = await pay.startDeposit(req.uid, amt, ph, FEES.depositFee(amt)); r.error ? res.status(400).json({ error: r.error }) : res.json({ ok: true, ref: r.id, message: r.message }); }
   catch (e) { console.error('Deposit failed:', e); res.status(500).json({ error: 'Could not start the deposit. Please try again.' }); }
 });
 app.post('/api/withdraw', auth, (req, res) => {   // the wallet is debited at once and the payout is sent straight away (or held for approval if it is large)
   const amt = Math.floor(+req.body.amount);
   if (!(amt >= 50)) return res.status(400).json({ error: 'Minimum KES 50' });
-  if (amt > 150000) return res.status(400).json({ error: 'Maximum KES 150,000 per withdrawal' });
+  if (amt > FEES.MAX_PAYOUT) return res.status(400).json({ error: 'Maximum KES ' + FEES.MAX_PAYOUT.toLocaleString('en') + ' per withdrawal' });
   let ph = null, force = false;
   if (req.body.phone) {   // paying out to a number other than the registered one: needs the password, and larger amounts are checked by an admin first
     ph = kePhone(req.body.phone); if (!ph) return res.status(400).json({ error: 'Enter a valid Safaricom number, for example 0712345678' });
@@ -265,7 +270,7 @@ app.post('/api/withdraw', auth, (req, res) => {   // the wallet is debited at on
     else { if (!bcrypt.compareSync(String(req.body.password || ''), u.hash)) return res.status(401).json({ error: 'Enter your password to withdraw to a different number' });
       force = amt >= (+E.OTHER_NUMBER_REVIEW_OVER || 1000); }
   }
-  try { const r = pay.createWithdrawal(req.uid, amt, ph, force); res.json({ ok: true, review: r.review }); }
+  try { const r = pay.createWithdrawal(req.uid, amt, ph, force, FEES.b2cFee(amt)); res.json({ ok: true, review: r.review }); }
   catch (e) { e.user ? res.status(400).json({ error: e.message }) : (console.error('Withdrawal failed:', e), res.status(500).json({ error: 'Could not start the withdrawal. Please try again.' })); }
 });
 
