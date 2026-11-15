@@ -23,6 +23,7 @@ if (PROD) {   // refuse to run live with unsafe settings
 const db = store.open(Database, E.DB_FILE || 'data.db');   // WAL + synchronous=FULL: a committed deposit survives a crash
 db.exec(`create table if not exists users(id integer primary key, phone text unique, name text, hash text, balance integer default 0);
 create table if not exists txs(id integer primary key, uid integer, type text, amount integer, ref text, status text default 'pending', created text default current_timestamp)`);
+try { db.exec('alter table tournaments add column live integer default 0'); } catch {}   // tournaments can be made live (watchable) by their creator
 for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text']) try { db.exec('alter table users add column ' + c); } catch {}
 // Every account gets a random permanent id. Login tokens carry it, so a token can never be mistaken for another person's account
 // (account numbers 1, 2, 3... are re-used if a database is ever replaced, and that is how people ended up in each other's accounts).
@@ -303,7 +304,7 @@ function pushBal(uid) { const s = online.get(uid); if (s) s.emit('balance', bal(
 io.use((s, next) => { try { const p = jwt.verify(s.handshake.auth.token, SECRET, JWT_OPTS); s.uid = p.id; const row = db.prepare('select excluded_until e, tv, uuid from users where id=?').get(s.uid); if (!sameAccount(row, p)) throw new Error('stale'); const ex = row.e; if (ex && ex > new Date().toISOString()) return next(new Error('excluded')); next(); } catch { next(new Error('auth')); } });
 const lobby = () => [...rooms.values()].filter(r => r.listed && !r.started && r.players.length < r.size).map(r => ({ code: r.code, id: r.id, game: r.game, stake: r.stake, by: r.names[0], n: r.players.length, size: r.size }));
 const specN = id => io.sockets.adapter.rooms.get('v' + id)?.size || 0;   // how many people are watching a game
-const liveList = () => [...rooms.values()].filter(r => r.live && r.started && !r.over).map(r => ({ id: r.id, game: r.game, stake: r.stake, names: r.names, w: specN(r.id) }));
+const liveList = () => [...rooms.values()].filter(r => r.live && r.started && !r.over).map(r => ({ id: r.id, game: r.game, stake: r.stake, names: r.names, w: specN(r.id), t: !!r.tid }));
 let liveT = null; const liveTick = () => { if (liveT) return; liveT = setTimeout(() => { liveT = null; io.emit('live', liveList()); }, 300); };   // tell everyone, at most a few times a second
 const view = r => ({ id: r.id, live: !!r.live, w: specN(r.id), game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
 const TURN = { chess: 120000, checkers: 60000, ludo: 30000, tictactoe: 20000 };   // per-move time limits
@@ -430,7 +431,7 @@ const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = crypto
 function startMatch(t, m, swap) {   // every match is a normal game room with no stake: the entry fees were paid up front
   let ps = JSON.parse(m.players); if (swap) ps = ps.slice().reverse();
   db.prepare("update t_matches set players=?, status='live' where id=?").run(JSON.stringify(ps), m.id);
-  const r = { id: rid++, game: t.game, stake: 0, size: ps.length, out: [], code: mkCode(), listed: false, started: false, ready: ps.map(() => true), players: ps, names: ps.map(tn), turn: 0, over: false, tid: t.id, mid: m.id, seen: {}, born: Date.now(), ...(t.game === 'chess' && tcParse(t.tc)) };
+  const r = { id: rid++, game: t.game, stake: 0, size: ps.length, out: [], code: mkCode(), listed: false, live: !!t.live, started: false, ready: ps.map(() => true), players: ps, names: ps.map(tn), turn: 0, over: false, tid: t.id, mid: m.id, seen: {}, born: Date.now(), ...(t.game === 'chess' && tcParse(t.tc)) };
   rooms.set(r.id, r); begin(r); send(r);
   db.prepare('update t_matches set room=? where id=?').run(r.id, m.id);
   ps.forEach(u => online.get(u)?.emit('tmatch', { tid: t.id, tname: t.name, round: m.round, rounds: t.rounds, room: r.id, game: t.game, names: r.names }));
@@ -488,13 +489,13 @@ function cancelT(tid) {
 }
 app.get('/api/tournaments', auth, (req, res) => {
   const rows = db.prepare("select t.*, u.name cname, w.name wname from tournaments t join users u on u.id=t.uid left join users w on w.id=t.winner where t.status in ('open','running') or (t.status='done' and t.started > datetime('now','-3 days')) order by case t.status when 'open' then 0 when 'running' then 1 else 2 end, t.id desc limit 40").all();
-  res.json(rows.map(t => { const ps = tPlayers(t.id); return { id: t.id, name: t.name, game: t.game, fee: t.fee, g: t.g, size: t.size, n: ps.length, status: t.status, creator: t.cname, mine: t.uid === req.uid, joined: ps.includes(req.uid), prize: tPrize(t.fee * t.size), winner: t.wname, tc: t.tc }; }));
+  res.json(rows.map(t => { const ps = tPlayers(t.id); return { id: t.id, name: t.name, game: t.game, fee: t.fee, g: t.g, size: t.size, n: ps.length, status: t.status, creator: t.cname, mine: t.uid === req.uid, joined: ps.includes(req.uid), prize: tPrize(t.fee * t.size), winner: t.wname, tc: t.tc, live: !!t.live }; }));
 });
 app.get('/api/tournaments/:id', auth, (req, res) => {
   const t = db.prepare('select t.*, u.name cname from tournaments t join users u on u.id=t.uid where t.id=?').get(+req.params.id); if (!t) return res.status(404).json({ error: 'Tournament not found' });
   const ps = tPlayers(t.id), ms = db.prepare('select * from t_matches where tid=? order by round, idx').all(t.id).map(m => { const pl = JSON.parse(m.players);
     return { id: m.id, round: m.round, idx: m.idx, status: m.status, winner: m.winner, players: pl.map(u => ({ id: u, name: tn(u) })), room: m.status === 'live' && pl.includes(req.uid) && rooms.has(m.room) ? m.room : null }; });
-  res.json({ id: t.id, name: t.name, game: t.game, fee: t.fee, g: t.g, size: t.size, rounds: t.rounds, status: t.status, creator: t.cname, mine: t.uid === req.uid, joined: ps.includes(req.uid), players: ps.map(u => ({ id: u, name: tn(u) })), prize: tPrize(t.fee * t.size), feeRate: TFEE, winner: t.winner, wname: t.winner ? tn(t.winner) : null, tc: t.tc, matches: ms });
+  res.json({ id: t.id, name: t.name, game: t.game, fee: t.fee, g: t.g, size: t.size, rounds: t.rounds, status: t.status, creator: t.cname, mine: t.uid === req.uid, joined: ps.includes(req.uid), players: ps.map(u => ({ id: u, name: tn(u) })), prize: tPrize(t.fee * t.size), feeRate: TFEE, live: !!t.live, winner: t.winner, wname: t.winner ? tn(t.winner) : null, tc: t.tc, matches: ms });
 });
 app.post('/api/tournaments', auth, (req, res) => {
   const b = req.body, game = b.game, name = String(b.name || '').trim().slice(0, 40), fee = Math.floor(+b.fee) || 0, size = Math.floor(+b.size);
@@ -508,7 +509,7 @@ app.post('/api/tournaments', auth, (req, res) => {
   if (db.prepare("select count(*) c from tournaments where uid=? and status='open'").get(req.uid).c >= 3) return bad('You already have 3 open tournaments');
   if (b.enter !== false && fee && bal(req.uid) < fee) return bad('Insufficient balance to enter your own tournament (KES ' + fee + ')');
   const rounds = Math.round(Math.log(size) / Math.log(g)), tc = game === 'chess' ? tcParse(b.tc).tc : null;
-  const id = db.prepare('insert into tournaments(uid,name,game,fee,g,size,rounds,tc) values(?,?,?,?,?,?,?,?)').run(req.uid, name, game, fee, g, size, rounds, tc).lastInsertRowid;
+  const id = db.prepare('insert into tournaments(uid,name,game,fee,g,size,rounds,tc,live) values(?,?,?,?,?,?,?,?,?)').run(req.uid, name, game, fee, g, size, rounds, tc, b.live ? 1 : 0).lastInsertRowid;
   if (b.enter !== false) joinT(id, req.uid);
   tPush(id); res.json({ ok: true, id });
 });
