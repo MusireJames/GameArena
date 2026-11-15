@@ -150,7 +150,7 @@ test('STAKES_ENABLED=0 launches free play only', async () => {
   finally { srv.kill(); await sleep(300); fs.rmSync('test3.db', { force: true }); }
 });
 
-async function twoPlayers(port, dice, game) {
+async function twoPlayers(port, dice, game, live) {
   const db = `t${port}.db`; fs.rmSync(db, { force: true });
   const srv = spawn('node', ['server.js'], { env: { ...process.env, PORT: port, DB_FILE: db, JWT_SECRET: 't', DEV_SHOW_CODES: '1', NODE_ENV: 'test', TEST_DICE: dice }, stdio: 'ignore' });
   await up(port);
@@ -159,9 +159,9 @@ async function twoPlayers(port, dice, game) {
   const ta = await reg('0711111111', 'A'), tb = await reg('0722222222', 'B');
   const ca = io(url, { auth: { token: ta } }), cb = io(url, { auth: { token: tb } }), last = {}; ca.on('state', s => last.a = s); cb.on('state', s => last.b = s);
   await sleep(300);
-  const made = await emit(ca, 'create', { game, stake: 0, size: 2 }); await emit(cb, 'join', { code: made.code });
+  const made = await emit(ca, 'create', { game, stake: 0, size: 2, live }); await emit(cb, 'join', { code: made.code });
   ca.emit('ready', true); cb.emit('ready', true); await sleep(200); ca.emit('start'); await sleep(300);
-  return { ca, cb, last, done: async () => { ca.close(); cb.close(); srv.kill(); await sleep(300); fs.rmSync(db, { force: true }); } };
+  return { ca, cb, last, url, reg, done: async () => { ca.close(); cb.close(); srv.kill(); await sleep(300); fs.rmSync(db, { force: true }); } };
 }
 const step = async (c, ev, d) => { c.emit(ev, d); await sleep(120); };
 test('Ludo: capturing a piece gives another roll', async () => {
@@ -191,6 +191,24 @@ test('chess: legal move hints and the last move are sent to both players', async
   finally { await g.done(); }
 });
 
+test('live games: anyone can watch a live game but cannot play in it, and private games cannot be watched', async () => {
+  const g = await twoPlayers(3980, '', 'connect4', true);
+  try {
+    const cc = io(g.url, { auth: { token: await g.reg('0733333333', 'C') } }); let list = [], st; cc.on('live', l => list = l); cc.on('state', x => st = x); await sleep(600);
+    assert.equal(list.length, 1, 'the live game is listed'); assert.deepEqual(list[0].names, ['A', 'B']);
+    assert.ok((await emit(cc, 'spectate', { id: list[0].id })).ok); await sleep(200); assert.equal(st.live, true); assert.equal(st.board.length, 42);
+    cc.emit('move', { c: 3 }); await sleep(200); assert.ok(g.last.a.board.every(x => x === 0), 'a spectator cannot move');
+    await step(g.ca, 'move', { c: 3 }); await sleep(100); assert.equal(st.board[38], 1, 'the spectator sees the players\' move'); assert.equal(g.last.a.w, 1, 'the players see how many are watching');
+    cc.emit('unspectate'); await sleep(600); assert.equal(list[0].w, 0); cc.close();
+  } finally { await g.done(); }
+});
+test('a game that was not made live cannot be watched', async () => {
+  const g = await twoPlayers(3979, '', 'connect4', false);
+  try {
+    const cc = io(g.url, { auth: { token: await g.reg('0733333333', 'C') } }); let list = [1]; cc.on('live', l => list = l); await sleep(600);
+    assert.equal(list.length, 0, 'it is not listed'); const id = g.last.a.id; assert.match((await emit(cc, 'spectate', { id })).error, /not live/); cc.close();
+  } finally { await g.done(); }
+});
 test('Google sign-in: new players add phone and age, returning players go straight in', async () => {
   const gm = http.createServer((req, res) => { const tk = decodeURIComponent(req.url.split('id_token=')[1] || ''); res.setHeader('Content-Type', 'application/json');
     if (tk === 'good') return res.end(JSON.stringify({ aud: 'cid', email: 'g@test.com', email_verified: 'true', name: 'Gina' }));
