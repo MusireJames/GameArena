@@ -302,9 +302,12 @@ const lmov = (L, p) => L.pos[p].map((x, t) => (x < 0 ? L.die === 6 : x + L.die <
 function pushBal(uid) { const s = online.get(uid); if (s) s.emit('balance', bal(uid)); }
 io.use((s, next) => { try { const p = jwt.verify(s.handshake.auth.token, SECRET, JWT_OPTS); s.uid = p.id; const row = db.prepare('select excluded_until e, tv, uuid from users where id=?').get(s.uid); if (!sameAccount(row, p)) throw new Error('stale'); const ex = row.e; if (ex && ex > new Date().toISOString()) return next(new Error('excluded')); next(); } catch { next(new Error('auth')); } });
 const lobby = () => [...rooms.values()].filter(r => r.listed && !r.started && r.players.length < r.size).map(r => ({ code: r.code, id: r.id, game: r.game, stake: r.stake, by: r.names[0], n: r.players.length, size: r.size }));
-const view = r => ({ id: r.id, game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
+const specN = id => io.sockets.adapter.rooms.get('v' + id)?.size || 0;   // how many people are watching a game
+const liveList = () => [...rooms.values()].filter(r => r.live && r.started && !r.over).map(r => ({ id: r.id, game: r.game, stake: r.stake, names: r.names, w: specN(r.id) }));
+let liveT = null; const liveTick = () => { if (liveT) return; liveT = setTimeout(() => { liveT = null; io.emit('live', liveList()); }, 300); };   // tell everyone, at most a few times a second
+const view = r => ({ id: r.id, live: !!r.live, w: specN(r.id), game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
 const TURN = { chess: 120000, checkers: 60000, ludo: 30000, tictactoe: 20000 };   // per-move time limits
-const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); io.to('r' + r.id).emit('state', view(r)); };
+const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); io.to('r' + r.id).emit('state', view(r)); if (r.live) io.to('v' + r.id).emit('state', view(r)); };
 function finish(r, winner, text) {   // winner = user id, or null for a draw (stakes refunded)
   if (r.over) return; r.over = true; r.result = text;
   const pot = r.stake * r.players.length, pay = Math.floor(pot * (1 - FEE)); r.winner = winner; r.pay = pay;
@@ -320,7 +323,7 @@ function finish(r, winner, text) {   // winner = user id, or null for a draw (st
   if (r.stake && pair) { const n = db.prepare("select count(*) c from plays where pair=? and stake>0 and created>datetime('now','-1 day')").get(pair).c / 2;
     if (n >= 5) db.prepare('insert into flags(note) values(?)').run('Possible collusion: accounts ' + pair + ' played ' + n + ' staked games in 24h'); }
   if (r.mid) tMatchDone(r, winner);
-  send(r); setTimeout(() => rooms.delete(r.id), 60000);
+  send(r); liveTick(); setTimeout(() => { rooms.delete(r.id); liveTick(); }, 60000);
 }
 function forfeit(r, i) {
   if (r.over || r.out[i]) return; r.out[i] = true;
@@ -345,7 +348,7 @@ setInterval(() => rooms.forEach(r => {
   if (now > r.deadline) timeout(r);
 }), 1000);
 function begin(r) {   // called when the host starts and everyone is ready
-  r.started = true; const n = r.players.length;
+  r.started = true; const n = r.players.length; liveTick();
   if (r.game === 'chess') { r.chess = new Chess(); if (!r.clock) { r.clock = [6e5, 6e5]; r.inc = 0; } r.t0 = Date.now(); }
   else if (r.game === 'ludo') r.ludo = { pos: r.players.map(() => [-1, -1, -1, -1]), die: null, last: null, seat: n === 2 ? [0, 2] : [0, 1, 2, 3].slice(0, n) };
   else if (r.game === 'checkers') { r.ck = Array.from({ length: 64 }, (_, i) => ((i >> 3) + (i & 7)) & 1 ? ((i >> 3) < 3 ? 'b' : (i >> 3) > 4 ? 'w' : 0) : 0); r.mustFrom = null; }
@@ -527,22 +530,31 @@ setInterval(() => queue.forEach((_, k) => matchmake(k)), 2000);
 io.on('connection', s => {
   const uid = s.uid; online.set(uid, s); io.emit('online', online.size);
   const me = db.prepare('select name from users where id=?').get(uid).name;
-  s.emit('balance', bal(uid)); s.emit('lobby', lobby());
+  s.emit('balance', bal(uid)); s.emit('lobby', lobby()); s.emit('live', liveList());
   const back = [...rooms.values()].find(r => r.started && !r.over && r.players.includes(uid));   // reconnect to a game in progress
   if (back) { s.join('r' + back.id); s.rid = back.id; if (back.away) delete back.away[uid]; if (back.seen) back.seen[uid] = true; send(back); }
   const busy = () => { const c = rooms.get(s.rid); return c && !c.over; };
   const find = code => [...rooms.values()].find(r => r.code === String(code || '').trim().toUpperCase() && !r.started && r.players.length < r.size);
-  s.on('create', ({ game, stake, size, listed, tc }, cb) => {
+  s.on('create', ({ game, stake, size, listed, tc, live }, cb) => {
     stake = Math.floor(+stake) || 0;
     if (!GAME_IDS.includes(game) || stake < 0) return;
     if (busy()) return cb?.({ error: 'Finish your current game first' });
     if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet. Play a free table.' });
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance' });
-    const r = { id: rid++, game, stake, size: game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+size) || 4)) : 2, out: [], ...(game === 'chess' && tcParse(tc)), code: mkCode(), listed: !!listed, started: false, ready: [false], players: [uid], names: [me], turn: 0, over: false };
+    const r = { id: rid++, game, stake, size: game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+size) || 4)) : 2, out: [], ...(game === 'chess' && tcParse(tc)), code: mkCode(), listed: !!listed, live: !!live, started: false, ready: [false], players: [uid], names: [me], turn: 0, over: false };
     const prev = rooms.get(s.rid); if (prev && prev.over) s.to('r' + prev.id).emit('rematch', { code: r.code, by: me, stake });
     hold(r.id, uid, stake);   // the host's stake is held in escrow
     rooms.set(r.id, r); s.join('r' + r.id); s.rid = r.id; pushBal(uid); cb?.({ code: r.code }); io.emit('lobby', lobby()); send(r);
   });
+  // ---- Watching live games: spectators get the same board updates, but can never move, chat into the game or see anything private ----
+  const stopWatching = () => { if (s.spec) { s.leave('v' + s.spec); s.spec = null; liveTick(); } };
+  s.on('spectate', ({ id } = {}, cb) => {
+    const c = rooms.get(s.rid); if (c && !c.over && c.players.includes(uid)) return cb?.({ error: 'Finish your current game first' });
+    const r = rooms.get(Math.floor(+id)); if (!r || !r.live || !r.started) return cb?.({ error: 'This game is not live any more' });
+    if (r.players.includes(uid)) return cb?.({ error: 'You are playing in this game' });
+    stopWatching(); s.join('v' + r.id); s.spec = r.id; liveTick(); s.emit('state', view(r)); cb?.({ ok: true });
+  });
+  s.on('unspectate', () => stopWatching());
   s.on('peek', ({ code }, cb) => {   // show a table's rules before the player agrees to stake
     const r = find(code);
     cb?.(r ? { code: r.code, game: r.game, stake: r.stake, size: r.size, host: r.names[0], n: r.players.length } : { error: 'No open table with that code' });
@@ -661,6 +673,7 @@ io.on('connection', s => {
   s.on('drawAccept', () => { const r = rooms.get(s.rid); if (!r || !r.started || r.over || !r.drawBy || r.drawBy === uid) return; finish(r, null, 'Draw agreed. Stakes refunded'); });
   s.on('resign', () => leave(s));
   s.on('disconnect', () => {
+    if (s.spec) liveTick();
     const cur = online.get(uid); if (cur === s) online.delete(uid); else if (cur) return;
     io.emit('online', online.size); unq(uid); [...proposals.values()].filter(p => p.players.includes(uid)).forEach(p => cancelProposal(p, uid));
     const r = rooms.get(s.rid);
