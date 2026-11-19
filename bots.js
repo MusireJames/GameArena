@@ -241,5 +241,5 @@ function anyMove(r, side, deps = {}) {
   }
   return null;
 }
-const NAMES = ['Amani', 'Zuri', 'Jabali', 'Tumaini', 'Neema', 'Baraka', 'Safari', 'Imani'];
+const NAMES = ['Hapy J', 'Dantez', 'Angel M', 'Kimani', 'Steve', 'Baraka', 'Safari', 'Joy'];
 module.exports = { anyMove, pickMove, NAMES, tictactoe, connect4, reversi, gomoku, checkers, chess, ludo };
