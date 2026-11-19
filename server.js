@@ -321,7 +321,7 @@ const liveList = () => [...rooms.values()].filter(r => r.live && r.started && !r
 let liveT = null; const liveTick = () => { if (liveT) return; liveT = setTimeout(() => { liveT = null; io.emit('live', liveList()); }, 300); };   // tell everyone, at most a few times a second
 const view = r => ({ id: r.id, live: !!r.live, w: specN(r.id), game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, bots: r.bots, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
 const TURN = { chess: 120000, checkers: 60000, ludo: 30000, tictactoe: 20000 };   // per-move time limits
-const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); io.to('r' + r.id).emit('state', view(r)); if (r.live) io.to('v' + r.id).emit('state', view(r)); botKick(r); };
+const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); r.ply = (r.ply || 0) + 1; io.to('r' + r.id).emit('state', view(r)); if (r.live) io.to('v' + r.id).emit('state', view(r)); botKick(r); };
 function finish(r, winner, text) {   // winner = user id, or null for a draw (stakes refunded)
   if (r.over) return; r.over = true; r.result = text;
   const pot = r.stake * r.players.length, pay = Math.floor(pot * (1 - FEE)); r.winner = winner; r.pay = pay;
@@ -570,24 +570,30 @@ function botKick(r) {   // called after every state change: if it is a bot's tur
 }
 function botAct(r) {
   if (!rooms.has(r.id) || r.over || !r.started || !r.bots[r.turn]) return;
-  const i = r.turn, uid = r.players[i];
+  const i = r.turn, uid = r.players[i], p0 = r.ply;
+  const verify = () => {   // if the bot's move changed nothing (illegal or failed), play any legal move so the game can never freeze
+    if (r.over || !rooms.has(r.id) || r.ply !== p0 || !r.bots[r.turn] || r.turn !== i) return;
+    console.error('Bot made no move in', r.game, 'room', r.id, '. Using a fallback move.');
+    try { const m = BOTS.anyMove(r, i, { lmov }); if (m) doMove(r, uid, r.names[i], m); else if (r.game === 'ludo') { r.ludo.die = null; nextTurn(r); send(r); } } catch (e) { console.error('Bot fallback failed:', e); }
+  };
   if (r.game === 'chess' && SF.available()) {   // Stockfish thinks in a separate process; the built-in bot is the fallback
     const fen = r.chess.fen(); r.botWait = true;
     return SF.best(fen).then(u => {
       r.botWait = false; if (r.over || r.turn !== i || r.chess.fen() !== fen) return;
-      const m = u ? { from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' } : BOTS.pickMove(r, i, {});
-      if (m) doMove(r, uid, r.names[i], m);
-    }).catch(e => { r.botWait = false; console.error('Stockfish bot error:', e); try { const m = BOTS.pickMove(r, i, {}); if (m) doMove(r, uid, r.names[i], m); } catch {} });
+      let m = null; if (u) { const f = u.slice(0, 2), t = u.slice(2, 4); if (r.chess.moves({ verbose: true }).some(x => x.from === f && x.to === t)) m = { from: f, to: t, promotion: u[4] || 'q' }; }
+      if (!m) { console.error('Stockfish gave no usable move (' + u + '). Using the built-in chess bot.'); m = BOTS.pickMove(r, i, {}); }
+      if (m) doMove(r, uid, r.names[i], m); verify();
+    }).catch(e => { r.botWait = false; console.error('Stockfish bot error:', e); verify(); });
   }
   try {
-    if (r.game === 'ludo' && !r.ludo.die) return doRoll(r, uid);
-    const m = BOTS.pickMove(r, i, { lmov, SAFE });
-    if (m) doMove(r, uid, r.names[i], m); else if (r.game === 'ludo') { r.ludo.die = null; nextTurn(r); send(r); }
+    if (r.game === 'ludo' && !r.ludo.die) doRoll(r, uid);
+    else { const m = BOTS.pickMove(r, i, { lmov, SAFE }); if (m) doMove(r, uid, r.names[i], m); }
   } catch (e) { console.error('Bot error:', e); }
+  verify();
 }
 function botScan() {   // someone has been waiting a while with nobody to play: offer a bot (they must accept)
   if (!BOT_ON) return; const now = Date.now();
-  queue.forEach((q, key) => { const [game, stake, n] = key.split(':'); if (+n !== 2 || !botOk(game, +stake)) return;
+  queue.forEach((q, key) => { const [game, stake, n] = key.split(':'); if ((+n !== 2 && game !== 'ludo') || !botOk(game, +stake)) return;   // Ludo: a 3 or 4 player search can also become a 2-player game with a bot
     if (+stake > 0 && botLossToday() >= BOT_LOSS) return;
     q.forEach(u => { const s = online.get(u), t = qt.get(u); if (!s || !t || s.pid || s.botAsk === t || now - t < BOT_WAIT) return; s.botAsk = t; s.emit('botOffer', { game, stake: +stake, max: BOT_MAX }); }); });
 }
@@ -734,7 +740,7 @@ io.on('connection', s => {
     if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet.' });
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance. You need KES ' + stake });
     if (stake && botLossToday() >= BOT_LOSS) return cb?.({ error: 'The bots are resting right now. Please wait for a person.' });
-    if (!(queue.get(qkey(game, stake, 2)) || []).includes(uid)) return cb?.({ error: 'Search for an opponent first' });
+    if (![2, 3, 4].some(n => (n === 2 || game === 'ludo') && (queue.get(qkey(game, stake, n)) || []).includes(uid))) return cb?.({ error: 'Search for an opponent first' });
     const bot = pickBotUser(stake); if (!bot) return cb?.({ error: 'All bots are busy. Please keep waiting for a person.' });
     unq(uid); s.emit('queue', false);
     const first = crypto.randomInt(0, 2) === 0, players = first ? [uid, bot.id] : [bot.id, uid];
@@ -783,7 +789,7 @@ io.on('connection', s => {
 });
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: 'Something went wrong. Please try again.' }); });
 process.on('unhandledRejection', e => console.error('Unhandled rejection:', e));
-srv.listen(E.PORT || 3000, () => { console.log('GameArena running on port ' + (E.PORT || 3000) + (STAKES ? '' : ' (free play only)')); pay.start(); store.startBackups(db); });
+srv.listen(E.PORT || 3000, () => { console.log('Chess bot: ' + (SF.available() ? 'Stockfish' : 'built-in engine (Stockfish is not installed)')); console.log('GameArena running on port ' + (E.PORT || 3000) + (STAKES ? '' : ' (free play only)')); pay.start(); store.startBackups(db); });
 let closing = false;   // a deploy sends SIGTERM: stop taking requests, save one last off-site snapshot, then exit
 ['SIGTERM', 'SIGINT'].forEach(sig => process.on(sig, async () => {
   if (closing) return; closing = true; pay.stop(); SF.stop(); srv.close(); setTimeout(() => process.exit(0), 25000).unref();
