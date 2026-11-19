@@ -149,7 +149,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 <div id="auth" class="hero hide"><h1>Play. Stake. Win.</h1><p class="mute">Chess, Checkers, Ludo and more. Free tables or real stakes, paid via M-Pesa.</p>
  <div class="card"><div class="btns" id="amode" style="margin-bottom:24px"><button class="pri" data-m="login" onclick="amode('login')">Login</button><button data-m="signup" onclick="amode('signup')">Create account</button></div>
   <div id="a1"><div class="f"><label>Phone number</label><input id="ph" placeholder="07XX XXX XXX" autocomplete="tel"></div><div class="f"><label>Password</label><input id="pw" type="password" placeholder="At least 6 characters" autocomplete="current-password"></div>
-   <div id="su" class="hide"><div class="f"><label>Display name</label><input id="nm" placeholder="Your name"></div><div class="f"><label>Date of birth (18+ only)</label><input id="dob" type="date"></div><div class="f"><label>Email (we send your verification code here)</label><input id="em" type="email" placeholder="you@example.com"></div><div class="f hide"><label>Send my verification code by</label><select id="ch"><option value="sms">SMS to my phone</option><option value="email">Email</option></select></div></div>
+   <div id="su" class="hide"><div class="f"><label>Display name</label><input id="nm" placeholder="Your name"></div><div class="f"><label>Date of birth (18+ only)</label><input id="dob" type="date"></div><div class="f"><label>Email (we send your verification code here)</label><input id="em" type="email" placeholder="you@example.com"></div><div class="f"><label>Referral code (optional)</label><input id="rf" placeholder="A friend's code, if you have one" maxlength="12" autocapitalize="characters"></div><div class="f hide"><label>Send my verification code by</label><select id="ch"><option value="sms">SMS to my phone</option><option value="email">Email</option></select></div></div>
    <button id="abtn" class="pri btn1" style="margin-top:24px" onclick="aStart()">Continue</button><div id="forgot" class="note" style="text-align:center;margin:14px 0 0"><a href="#" onclick="rsOpen();return false">Forgot your password?</a></div><div id="gwrap" class="hide" style="margin-top:20px"><div class="note" style="text-align:center;margin:0 0 12px">or</div><div id="gbtn" style="display:flex;justify-content:center"></div></div></div>
   <div id="a4" class="hide"><p class="mute" style="margin:0 0 16px">Enter the phone number or email on your account. We will email you a 6-digit code.</p>
    <div class="f"><label>Phone number or email</label><input id="rid" placeholder="07XX XXX XXX or you@example.com" autocomplete="username"></div>
@@ -185,7 +185,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
  <div style="width:100%;max-width:520px"><div id="msgs" style="height:96px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13px"></div><div class="row nw" style="margin-top:8px"><input id="cm" placeholder="Message" onkeydown="if(event.key=='Enter')say()"><button onclick="say()">Send</button></div></div></div></div>
 </section>
 <section id="p-wallet" class="page"><div class="cols">
- <div class="card"><h2>Balance</h2><div class="bal" id="bal2">KES 0</div><div class="f"><label>Amount (KES): what reaches your wallet when you deposit, or your phone when you withdraw</label><input id="amt" type="number" min="0" placeholder="e.g. 500"></div>
+ <div class="card"><h2>Balance</h2><div class="bal" id="bal2">KES 0</div><div id="lockn" class="note hide" style="margin:6px 0 0"></div><div class="f"><label>Amount (KES): what reaches your wallet when you deposit, or your phone when you withdraw</label><input id="amt" type="number" min="0" placeholder="e.g. 500"></div>
   <div class="f"><label>M-Pesa number</label><input id="mp" type="tel" inputmode="tel" placeholder="Leave empty to use your registered number"></div>
   <div class="f" id="pwf" style="display:none"><label>Your password (needed to withdraw to a different number)</label><input id="pw" type="password" autocomplete="current-password"></div>
   <div id="quote" class="note" style="margin:10px 0 0;min-height:44px"></div>
@@ -212,6 +212,8 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
  <p class="note" style="margin:10px 0 0">Be kind. No links or phone numbers. Never share your PIN or password.</p></div></section>
 <section id="p-acct" class="page"><div class="cols">
  <div><div class="card"><h2>Profile</h2><div id="prof"></div><button class="btn1" style="margin-top:20px" onclick="localStorage.removeItem('t');location.reload()">Log out</button></div>
+  <div class="card hide" id="refc"><h2>Invite friends, earn KES <span id="refb">10</span></h2><p class="mute" style="margin:0 0 12px">Share your link. When someone joins with it and deposits KES <span id="refm">50</span> or more, you get a bonus. The bonus unlocks for withdrawal after you play one staked game.</p>
+   <div class="row nw"><input id="reflink" readonly><button onclick="refCopy()">Copy</button></div><div class="btns" style="margin-top:10px"><button class="pri" onclick="refWa()">Share on WhatsApp</button></div><div id="refstat" style="margin-top:12px"></div></div>
   </div>
  <div><div class="card"><h2>Responsible play</h2><div class="f"><label>Daily deposit limit (KES)</label><div class="row nw"><input id="lim" type="number" min="0" placeholder="0 = no limit"><button onclick="setLim()">Save</button></div></div>
   <div class="f"><label>Take a break</label><div class="row nw"><select id="ex"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option><option value="180">6 months</option></select><button onclick="excl()">Self-exclude</button></div></div><p class="note">Self-exclusion cannot be undone until it ends. You can still withdraw.</p></div>
@@ -223,6 +225,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 <div id="end" class="hide" data-r=""><div id="fx"></div><div class="card endc"><div id="eico" class="eico"></div><h1 id="ettl"></h1><p id="esub" class="mute" style="margin:0"></p><div id="emoney" class="emoney"></div><div id="emeta" class="emeta"></div>
  <div class="btns"><button id="ebo" onclick="endBoard()">View board</button><button id="ere" class="pri" onclick="endRematch()">Rematch</button></div><button class="btn1" style="margin-top:12px" onclick="endHome()">Back to home</button></div></div>
 <div id="pill" class="hide" onclick="endShow()">Results</div>
+<div id="botoffer" class="hide" style="position:fixed;inset:0;z-index:46;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center"><div class="card" style="max-width:380px;width:90%;text-align:center;margin:0"><h2>🤖 No opponent yet</h2><p id="botmsg" class="mute"></p><div class="btns"><button onclick="botNo()">Keep waiting</button><button id="botyes" class="pri" onclick="botYes()">Play the bot</button></div></div></div>
 <div id="srch" class="hide"><i class="live"></i><span id="srcht">Searching for an opponent…</span><button onclick="sock.emit('cancelFind');qUI(false)">Cancel</button></div>
 <div id="mm" class="hide" style="position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center"><div class="card" style="max-width:380px;width:90%;text-align:center;margin:0"><h2>Match found</h2><div id="mmi"></div><div class="row" style="justify-content:center;margin-top:14px"><button class="pri" onclick="mmAns(1)">Accept</button><button onclick="mmAns(0)">Decline</button></div></div></div>
 <script src="/socket.io/socket.io.js"></script>
@@ -230,6 +233,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 let tok=localStorage.t,S,me,sock,sel=null,G='chess',rm=null,tEnd=null,curId=0,clkAt=0,prevId=0,lastRoll=null,bv=0,lg=[],lmKey='',endFor=0;
 const $=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 const GAMES=[['chess','♞','Chess','#81b64c','#0f1a07'],['checkers','●','Checkers','#d9452f','#ffffff'],['ludo','⚄','Ludo','#fdd835','#1a1500'],['tictactoe','✕','Tic-Tac-Toe','#4fc3f7','#00212e'],['connect4','◍','Connect Four','#ffb300','#1a1100'],['reversi','◐','Reversi','#26a69a','#00201d'],['gomoku','◎','Gomoku','#ab47bc','#ffffff']],GN=Object.fromEntries(GAMES.map(g=>[g[0],g[2]]));
+try{const q=new URLSearchParams(location.search).get('ref');if(q)localStorage.ref=q.replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12)}catch(e){}
 const api=async(p,b)=>(await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:b&&JSON.stringify(b)})).json().catch(()=>({error:'Server error'}));
 function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.classList.add('out');setTimeout(()=>d.remove(),260)},3000)}
 function tiles(){const g=GAMES.find(x=>x[0]==G),st=document.body.style;st.setProperty('--ac',g[3]);st.setProperty('--acf',g[4]);
@@ -290,12 +294,13 @@ async function gCb(r){$('err').textContent='';$('lmsg').textContent='Signing you
  if(j.token){tok=localStorage.t=j.token;return start()}
  if(j.needProfile){gtok=j.gt;$('a1').classList.add('hide');$('amode').classList.add('hide');$('a3').classList.remove('hide');return}
  $('err').textContent=j.error||'Google sign-in failed'}
-async function gDone(){$('err').textContent='';const stop=loading($('gdbtn'),'Finishing…','Creating your account…',false);let j;try{j=await api('google/complete',{token:gtok,phone:$('gph').value,dob:$('gdob').value})}catch(e){j={error:'Connection problem. Check your internet and try again.'}}
+async function gDone(){$('err').textContent='';const stop=loading($('gdbtn'),'Finishing…','Creating your account…',false);let j;try{j=await api('google/complete',{token:gtok,phone:$('gph').value,dob:$('gdob').value,ref:localStorage.ref||''})}catch(e){j={error:'Connection problem. Check your internet and try again.'}}
  if(j.token){tok=localStorage.t=j.token;try{await start()}finally{stop()}}else{stop();$('err').textContent=j.error}}
 let amd='login',apend=null,rsT=null;
+try{if(localStorage.ref&&!localStorage.t)setTimeout(()=>{amode('signup');if($('rf'))$('rf').value=localStorage.ref},0)}catch(e){}
 function amode(m){amd=m;$('forgot').classList.toggle('hide',m!='login');$('su').classList.toggle('hide',m!='signup');document.querySelectorAll('#amode button').forEach(b=>b.classList.toggle('pri',b.dataset.m==m));$('err').textContent=''}
 async function aStart(){$('err').textContent='';const b={phone:$('ph').value,password:$('pw').value};
- if(amd=='signup')Object.assign(b,{name:$('nm').value,dob:$('dob').value,email:$('em').value,channel:$('ch').value});
+ if(amd=='signup')Object.assign(b,{name:$('nm').value,dob:$('dob').value,email:$('em').value,channel:$('ch').value,ref:$('rf').value||localStorage.ref||''});
  const stop=loading($('abtn'),amd=='signup'?'Creating account…':'Signing in…',amd=='signup'?'Creating your account and sending your code. This can take a few seconds.':'Checking your details and sending your code. This can take a few seconds.');let j;try{j=await api(amd=='signup'?'register/start':'login/start',b)}catch(e){j={error:'Connection problem. Check your internet and try again.'}}stop();
  if(j.token){tok=localStorage.t=j.token;return start()}
  if(j.error)return $('err').textContent=j.error;
@@ -311,7 +316,9 @@ function aBack(){clearInterval(rsT);$('a2').classList.add('hide');$('a1').classL
 async function start(){me=await api('me');if(!me.id){localStorage.removeItem('t');$('auth').classList.remove('hide');return}
  $('auth').classList.add('hide');$('app').classList.remove('hide');$('top').classList.remove('hide');$('nav').classList.remove('hide');$('who').textContent=me.name+' · '+me.rating;if(me.admin)$('who').insertAdjacentHTML('afterend','<a href="/admin.html" style="color:#fff">Admin</a>');tiles();side();prof();tOpts();
  sock=io({auth:{token:tok}});
- sock.on('balance',b=>{setBal(b);side()});
+ sock.on('balance',b=>{setBal(b);side();lockUI()});
+ lockUI();refUI();sock.on('refresh',()=>{lockUI();refUI()});
+ sock.on('botOffer',o=>{bo=o;$('botmsg').textContent='Nobody is searching for '+GN[o.game]+(o.stake?' at KES '+o.stake:'')+' right now. You can play a computer opponent (a bot, not a person)'+(o.stake?' for the same stake. The bot plays well, so you can lose your stake.':', just for fun.')+' Or keep waiting for a real player.';$('botoffer').classList.remove('hide')});
 sock.on('lobby',l=>{LB=l;$('rooms').innerHTML=l.map(r=>{const mine=!!me&&r.hid==me.id,tags=`<span class="tag">${r.stake?'KES '+r.stake:'FREE'}</span>${r.live?'<span class="livetag" style="margin:0 0 0 6px"><i></i>LIVE</span>':''}${r.tc?`<span class="tag">${r.tc}</span>`:''}`;
   return `<div class="item"><div><b>${GN[r.game]}</b>${tags}<div class="mute" style="font-size:13px">${mine?'Your table · waiting for a challenger…':'Challenge from '+esc(r.by)}</div></div>${r.open?(mine?`<button onclick="cancelTable(${r.id})">Cancel</button>`:`<button class="pri" onclick="accept(${r.id})">Accept challenge</button>`):`<button class="pri" onclick="peek('${r.code}')">View</button>`}</div>`}).join('')||'<div class="mute">No public tables right now. Create one and wait for a challenger.</div>'});
  sock.on('challenge',c=>toast(c.by+' accepted your challenge. Your game is starting!'));
@@ -368,7 +375,7 @@ function draw(s){S=s;const SN=prevId==s.id?{b:snap($('board')),c:snap($('ck')),l
  $('pls').innerHTML=s.names.map((n,i)=>`<span class="pl${s.turn==i&&!s.over&&full?' on':''}">${esc(n)}</span>`).join('');
  if(curId!=s.id){curId=s.id;$('msgs').innerHTML='';rm=null}
  tEnd=s.left==null?null:Date.now()+s.left;clkAt=Date.now();let a='';
- if(mine>=0&&s.started&&!s.over&&s.players.length==2&&s.game!='ludo'){if(!s.drawBy)a+=`<button onclick="sock.emit('drawOffer')">Offer draw</button>`;else if(s.drawBy!=me.id)a+=`<button class="pri" onclick="sock.emit('drawAccept')">Accept draw</button>`;else a+='<span class="mute">Draw offered...</span>'}
+ if(mine>=0&&s.started&&!s.over&&s.players.length==2&&s.game!='ludo'&&!(s.bots&&s.bots.some(x=>x))){if(!s.drawBy)a+=`<button onclick="sock.emit('drawOffer')">Offer draw</button>`;else if(s.drawBy!=me.id)a+=`<button class="pri" onclick="sock.emit('drawAccept')">Accept draw</button>`;else a+='<span class="mute">Draw offered...</span>'}
  if(s.over&&!s.tid&&mine>=0)a+=rm?`<button class="pri" onclick="join('${rm.code}')">Join rematch${rm.stake?' (KES '+rm.stake+')':''}</button>`:`<button class="pri" onclick="rematch()">Rematch</button>`;
  if(mine<0)a+='<span class="mute">You are watching. </span><button onclick="leave()">Stop watching</button>';
  $('lvtag').classList.toggle('hide',!s.live);$('lvn').textContent=s.w?' · 👁 '+s.w:'';
@@ -407,7 +414,13 @@ setInterval(()=>{const f=ms=>{const t=Math.ceil(Math.max(0,ms)/1000);return Math
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');
 let mid=null,mt=null,mmc=0,mmd=null,acc=false;
 let srT=null,srS=0;
-function qUI(on){$('srch').classList.toggle('hide',!on);clearInterval(srT);document.querySelectorAll('[data-find]').forEach(b=>b.disabled=!!on);
+let bo=null;function botNo(){$('botoffer').classList.add('hide')}
+function botYes(){if(!bo)return;const b=$('botyes');b.disabled=true;sock.emit('playBot',{game:bo.game,stake:bo.stake},r=>{b.disabled=false;$('botoffer').classList.add('hide');if(r&&r.error)toast(r.error)})}
+async function lockUI(){try{const m=await api('me');if(!m||!m.id)return;me.locked=m.locked;const n=$('lockn');if(m.locked>0){n.textContent='🔒 KES '+m.locked+' of your balance is a referral bonus. It unlocks after you play one staked game. You can withdraw KES '+Math.max(0,m.balance-m.locked)+' now.';n.classList.remove('hide')}else n.classList.add('hide')}catch(e){}}
+async function refUI(){try{const r=await api('referral');if(!r||!r.on){$('refc').classList.add('hide');return}$('refc').classList.remove('hide');$('refb').textContent=r.bonus;$('refm').textContent=r.min;$('reflink').value=r.link;$('refstat').innerHTML=[['Friends joined',r.invited],['Bonuses earned','KES '+r.earned],['Still locked','KES '+r.locked]].map(([k,v])=>`<div class="item"><span class="mute">${k}</span><b>${v}</b></div>`).join('')}catch(e){}}
+function refCopy(){const v=$('reflink').value;(navigator.clipboard?navigator.clipboard.writeText(v):Promise.reject()).then(()=>toast('Link copied'),()=>{$('reflink').select();toast('Press copy on your keyboard')})}
+function refWa(){window.open('https://wa.me/?text='+encodeURIComponent('Join me on GameArena: chess, ludo, checkers and more. Sign up with my link: '+$('reflink').value),'_blank')}
+function qUI(on){if(!on)$('botoffer').classList.add('hide');$('srch').classList.toggle('hide',!on);clearInterval(srT);document.querySelectorAll('[data-find]').forEach(b=>b.disabled=!!on);
  if(on){srS=0;const u=()=>{$('srcht').textContent='Searching for an opponent… '+Math.floor(srS/60)+':'+String(srS%60).padStart(2,'0')};u();srT=setInterval(()=>{srS++;u()},1000)}}
 function find(){sel=null;rm=null;qUI(true);sock.emit('find',{game:G,stake:$('stake').value,size:$('sz').value},r=>{if(r?.error){toast(r.error);qUI(false)}})}
 function mmr(){$('mmi').innerHTML=`<b>${GN[mmd.game]}</b><span class="tag">${mmd.stake?'KES '+mmd.stake+' stake':'Free'}</span><div style="margin:10px 0">${mmd.opp.map(x=>esc(x)).join(', ')}</div><div class="mute">${acc?'Waiting for the others · ':''}Auto-cancels in ${mmc}s</div>`}
