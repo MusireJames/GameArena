@@ -229,5 +229,19 @@ function pickMove(r, side, deps = {}) {
   }
   return null;
 }
+/** Any legal move at all: the safety net used when the real bot fails to move, so a game can never freeze. */
+function anyMove(r, side, deps = {}) {
+  const pick = a => a.length ? a[rnd(a.length)] : null;
+  switch (r.game) {
+    case 'tictactoe': { const f = r.board.map((x, i) => x ? -1 : i).filter(i => i >= 0); const i = pick(f); return i == null ? null : { i }; }
+    case 'connect4': { const f = [0, 1, 2, 3, 4, 5, 6].filter(c => !r.board[c]); const c = pick(f); return c == null ? null : { c }; }
+    case 'gomoku': { const f = r.board.map((x, i) => x ? -1 : i).filter(i => i >= 0); const i = pick(f); return i == null ? null : { i }; }
+    case 'reversi': { const i = pick(BG.legal('reversi', r.board, side).map(m => Array.isArray(m) ? m[0] : m)); return i == null ? null : { i }; }
+    case 'checkers': { const m = pick(CK.ckMoves(r.ck, side, r.mustFrom)); return m ? { from: m.from, to: m.to } : null; }
+    case 'chess': { const m = pick(r.chess.moves({ verbose: true })); return m ? { from: m.from, to: m.to, promotion: 'q' } : null; }
+    case 'ludo': { const t = pick(deps.lmov(r.ludo, side)); return t == null ? null : { t }; }
+  }
+  return null;
+}
 const NAMES = ['Amani', 'Zuri', 'Jabali', 'Tumaini', 'Neema', 'Baraka', 'Safari', 'Imani'];
-module.exports = { pickMove, NAMES, tictactoe, connect4, reversi, gomoku, checkers, chess, ludo };
+module.exports = { anyMove, pickMove, NAMES, tictactoe, connect4, reversi, gomoku, checkers, chess, ludo };
