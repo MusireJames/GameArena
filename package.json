@@ -7,7 +7,7 @@
   "test": "node --test test.js",
   "backup": "node backup.js",
   "secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
-  "test:payments": "node --disable-warning=ExperimentalWarning --test payments.test.js store.test.js boardgames.test.js fees.test.js"
+  "test:payments": "node --disable-warning=ExperimentalWarning --test payments.test.js store.test.js boardgames.test.js fees.test.js bots.test.js"
  },
  "dependencies": {
   "bcryptjs": "^2.4.3",
