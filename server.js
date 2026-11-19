@@ -555,7 +555,7 @@ const pubShape = r => ({ id: r.id, uid: r.uid, name: r.name, text: r.text, at: n
 const pubRows = () => db.prepare('select c.*, p.name pn, p.text pt, p.uid pu from chat c left join chat p on p.id=c.reply_to order by c.id desc limit 80').all().reverse().map(pubShape);
 // ---- Bots: a clearly labelled computer opponent, offered ONLY to a player who has waited in "Find opponent" with nobody to play and who says yes. ----
 const BOT_ON = E.BOTS !== '0', BOT_MAX = +E.BOT_MAX_STAKE || 50, BOT_WAIT = (+E.BOT_WAIT_SECONDS || 20) * 1000, BOT_LOSS = +E.BOT_DAILY_LOSS || 300;
-const BOT_PAID = (E.BOT_STAKED_GAMES === undefined ? 'tictactoe,connect4' : E.BOT_STAKED_GAMES).split(',').map(x => x.trim()).filter(Boolean);   // bots play for money ONLY in these games; every other game is free-play against a bot
+const BOT_PAID = (E.BOT_STAKED_GAMES === undefined ? 'tictactoe,connect4,ludo' : E.BOT_STAKED_GAMES).split(',').map(x => x.trim()).filter(Boolean);   // bots play for money ONLY in these games; every other game is free-play against a bot
 const botOk = (game, stake) => stake === 0 || (stake <= BOT_MAX && BOT_PAID.includes(game));
 BOTS.NAMES.forEach(n => db.prepare("insert or ignore into users(phone,name,hash,is_bot,verified,rating) values(?,?,'!',1,1,1000)").run('bot-' + n.toLowerCase(), '🤖 Bot ' + n));
 function botLossToday() { return -db.prepare("select coalesce(sum(net),0) s from plays where uid in (select id from users where is_bot=1) and created > datetime('now','-1 day')").get().s; }
