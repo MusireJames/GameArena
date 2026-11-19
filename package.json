@@ -7,7 +7,7 @@
   "test": "node --test test.js",
   "backup": "node backup.js",
   "secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
-  "test:payments": "node --disable-warning=ExperimentalWarning --test payments.test.js store.test.js boardgames.test.js fees.test.js bots.test.js"
+  "test:payments": "node --disable-warning=ExperimentalWarning --test payments.test.js store.test.js boardgames.test.js fees.test.js bots.test.js stockfish.test.js"
  },
  "dependencies": {
   "bcryptjs": "^2.4.3",
@@ -18,6 +18,9 @@
   "jsonwebtoken": "^9.0.2",
   "socket.io": "^4.7.5",
   "nodemailer": "^6.9.14"
+ },
+ "optionalDependencies": {
+  "stockfish": "^19.0.1"
  },
  "devDependencies": {
   "socket.io-client": "^4.7.5"
