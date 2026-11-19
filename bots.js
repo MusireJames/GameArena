@@ -200,21 +200,19 @@ function chessSearch(ch, ms_budget) {
   return { from: bestMove.from, to: bestMove.to };
 }
 
-// ---- Ludo: returns the token index to move (the dice are rolled by the server for bots exactly as for people) ----
-function ludo(L, p, legal, SAFE, seats) {
+// ---- Ludo: returns the token index to move (the dice are rolled by the server for bots exactly as for people; the bot gets no luck) ----
+// Scores every legal token: capture (worth more the further the victim got) > reach home > leave the yard > enter the home lane > land on a safe square > escape danger > advance.
+function ludoBasic(L, p, legal, SAFE, seats) {
   const toks = legal; if (!toks.length) return null; const d = L.die, st = seats[p] * 13;
   const opp = []; L.pos.forEach((arr, q) => { if (q === p) return; arr.forEach(y => { if (y >= 0 && y <= 50) opp.push({ g: (seats[q] * 13 + y) % 52, y }); }); });
   const threat = g => opp.some(o => { const k = (g - o.g + 52) % 52; return k >= 1 && k <= 6; });
-  const score = t => {
-    const x = L.pos[p][t], n = x < 0 ? 0 : x + d; let s = n * 0.3;
+  return best(toks, t => { const x = L.pos[p][t], n = x < 0 ? 0 : x + d; let s = n * 0.3;
     if (n === 56) s += 90; if (x < 0) s += 60; if (n >= 51 && n < 56) s += 40;
-    if (n <= 50) { const g = (st + n) % 52, safe = SAFE.includes(g);
-      const hit = opp.find(o => o.g === g); if (hit && !safe) s += 100 + hit.y * 0.5;
-      if (safe) s += 25; else if (threat(g)) s -= 30; }
+    if (n <= 50) { const g = (st + n) % 52, safe = SAFE.includes(g); const hit = opp.find(o => o.g === g); if (hit && !safe) s += 100 + hit.y * 0.5; if (safe) s += 25; else if (threat(g)) s -= 30; }
     if (x >= 0 && x <= 50) { const g0 = (st + x) % 52; if (!SAFE.includes(g0) && threat(g0)) s += 30; }
-    return s; };
-  return best(toks, score);
+    return s; });
 }
+const ludo = ludoBasic;   // I tried a 'risk of being captured' version and several re-weightings: in 1,500-game simulations none beat this one by more than noise, and the risk version was worse
 
 /** What should the bot (playing seat `side`) play now? Returns the same shape as the `move` event a person would send, or null. */
 function pickMove(r, side, deps = {}) {
