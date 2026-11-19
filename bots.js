@@ -160,26 +160,42 @@ function chEval(ch) {   // from the point of view of the side to move
   return ch.turn() === 'w' ? s : -s;
 }
 function chOrder(ms) { return ms.map(m => ({ m, k: (m.captured ? 10 + PV[m.captured] / 100 : 0) + (m.promotion ? 9 : 0) + (/[+#]/.test(m.san) ? 3 : 0) + Math.random() })).sort((a, b) => b.k - a.k).map(x => x.m); }
-function chess(ch, ms_budget = 1500) {
-  const t0 = Date.now(); let stop = false, bestMove = null;
+function chess(ch, ms_budget = 2500) {
+  try { return chessSearch(ch, ms_budget); }
+  catch (e) { const l = ch.moves({ verbose: true }); return l.length ? { from: l[0].from, to: l[0].to } : null; }   // never leave a game stuck
+}
+function chessSearch(ch, ms_budget) {
+  const t0 = Date.now(); let stop = false, bestMove = null, nodes = 0;
+  const timeUp = () => { if ((++nodes & 255) === 0 && Date.now() - t0 > ms_budget) stop = true; return stop; };
+  const mvv = m => (m.captured ? 10 * PV[m.captured] - PV[m.piece] / 10 : 0) + (m.promotion ? 800 : 0);
+  const qs = (alpha, beta, d) => {   // only captures are searched at the end, so a piece is never left hanging at the horizon
+    if (timeUp()) return 0;
+    const stand = chEval(ch); if (d <= 0 || stand >= beta) return stand; if (stand > alpha) alpha = stand;
+    const caps = ch.moves({ verbose: true }).filter(m => m.captured || m.promotion).sort((x, y) => mvv(y) - mvv(x));
+    for (const m of caps) { ch.move({ from: m.from, to: m.to, promotion: m.promotion }); const s = -qs(-beta, -alpha, d - 1); ch.undo(); if (stop) return 0; if (s >= beta) return s; if (s > alpha) alpha = s; }
+    return alpha;
+  };
   const search = (d, alpha, beta) => {
-    if (Date.now() - t0 > ms_budget) { stop = true; return 0; }
-    if (ch.isCheckmate()) return -99000 - d; if (ch.isDraw()) return 0; if (d === 0) return chEval(ch);
-    for (const m of chOrder(ch.moves({ verbose: true }))) {
+    if (timeUp()) return 0;
+    if (ch.isCheckmate()) return -99000 - d; if (ch.isDraw()) return 0; if (d === 0) return qs(alpha, beta, 4);
+    const ms = ch.moves({ verbose: true }).map(m => ({ m, k: mvv(m) + (/[+#]/.test(m.san) ? 50 : 0) + Math.random() })).sort((x, y) => y.k - x.k);
+    for (const { m } of ms) {
       ch.move({ from: m.from, to: m.to, promotion: m.promotion }); const s = -search(d - 1, -beta, -alpha); ch.undo();
       if (stop) return 0; if (s > alpha) alpha = s; if (alpha >= beta) break;
     }
     return alpha;
   };
   const root = ch.moves({ verbose: true }); if (!root.length) return null;
-  bestMove = root[rnd(root.length)];
-  for (let depth = 1; depth <= 3; depth++) {
-    let alpha = -1e9, cur = null;
-    for (const m of chOrder(root)) {
+  bestMove = root[rnd(root.length)]; let order = root.map(m => ({ m, k: mvv(m) + Math.random() })).sort((x, y) => y.k - x.k).map(x => x.m);
+  for (let depth = 1; depth <= 5; depth++) {
+    let alpha = -1e9; const scored = [];
+    for (const m of order) {
       ch.move({ from: m.from, to: m.to, promotion: m.promotion }); const s = -search(depth - 1, -1e9, -alpha); ch.undo();
-      if (stop) break; if (s > alpha) { alpha = s; cur = m; }
+      if (stop) break; scored.push({ m, s }); if (s > alpha) alpha = s;
     }
-    if (stop) break; if (cur) bestMove = cur; if (alpha > 90000) break;
+    if (stop || scored.length < order.length) break;
+    scored.sort((x, y) => y.s - x.s); bestMove = scored[0].m; order = scored.map(x => x.m);   // the best move of this depth is searched first next time
+    if (scored[0].s > 90000) break;
   }
   return { from: bestMove.from, to: bestMove.to };
 }
