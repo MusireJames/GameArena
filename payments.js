@@ -17,7 +17,7 @@
 //   4. FAILED / REVERSED / CANCELLED refunds the player exactly once. SUCCESS marks it done.
 const inTxnDepth = new WeakMap();
 
-function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, alert = () => {}, clock = Date.now, baseUrl = env.BASE_URL || '', secret = env.CALLBACK_SECRET || 'dev-callback-secret' }) {
+function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, alert = () => {}, clock = Date.now, baseUrl = env.BASE_URL || '', secret = env.CALLBACK_SECRET || 'dev-callback-secret', locked = () => 0, onDeposited = () => {} }) {
   const E = env;
   const REVIEW = +E.WITHDRAW_REVIEW_OVER || 5000;
   const DEP_EXPIRE = (+E.DEPOSIT_EXPIRE_SECONDS || 300) * 1000;
@@ -81,7 +81,7 @@ function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, al
         const c = db.prepare("update txs set status='done', pid=coalesce(pid,?), note=?, upd=? where id=? and status in ('pending','failed')").run(d.id, d.receipt ? 'receipt ' + d.receipt : '', clock(), t.id);
         if (c.changes) { add(t.uid, t.amount, 'M-Pesa deposit'); credited = true; }
       });
-      if (credited) { pushBal(t.uid); if (t.status === 'failed' && !/^timeout/.test(t.note || '')) flag(`Deposit ${t.id} had failed but PalPluss later reported SUCCESS. It was credited; check it.`); }
+      if (credited) { pushBal(t.uid); try { onDeposited(t.uid, t.amount); } catch (e) { flag('Referral hook failed for deposit ' + t.id + ': ' + e.message); } if (t.status === 'failed' && !/^timeout/.test(t.note || '')) flag(`Deposit ${t.id} had failed but PalPluss later reported SUCCESS. It was credited; check it.`); }
     } catch (e) { flag(`Could not credit deposit ${t.id}: ${e.message}`); }
     return get(t.id).status;
   }
@@ -124,6 +124,8 @@ function createPayments({ db, add, pushBal = () => {}, pp, env = process.env, al
     inTxn(() => {
       const b = db.prepare('select balance from users where id=?').get(uid)?.balance || 0;
       if (b < amt + fee) throw Object.assign(new Error('Insufficient balance'), { user: true });
+      const lk = Math.min(b, locked(uid) || 0);   // referral bonus that is still locked (the player has not played a game yet)
+      if (lk && b - lk < amt + fee) throw Object.assign(new Error('KES ' + lk + ' of your balance is a referral bonus. It unlocks after you play one staked game. You can withdraw up to KES ' + Math.max(0, b - lk - fee) + ' now.'), { user: true });
       add(uid, -(amt + fee), 'withdrawal');
       id = Number(db.prepare("insert into txs(uid,type,amount,ref,status,at,nexts,phone,fee) values(?,?,?,?,?,?,0,?,?)").run(uid, 'withdraw', amt + fee, '', review ? 'review' : 'queued', clock(), phone || null, fee).lastInsertRowid);
       db.prepare('update txs set ref=?, idem=? where id=?').run('WD-' + id, 'gamearena-wd-' + id, id);
