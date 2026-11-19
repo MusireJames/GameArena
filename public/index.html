@@ -232,11 +232,12 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 <script>
 let tok=localStorage.t,S,me,sock,sel=null,G='chess',rm=null,tEnd=null,curId=0,clkAt=0,prevId=0,lastRoll=null,bv=0,lg=[],lmKey='',endFor=0;
 const $=i=>document.getElementById(i),esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+const cs=t=>typeof t=='string'?t.replace(/🤖\s*/g,'').replace(/\bbot\s+/gi,'').trim():t;
 const cn=n=>{const t=String(n??'').replace(/^\s*(?:🤖\s*)?(?:bot\b[\s:\-·]*)?/i,'').trim();return t||'Player'};
 const GAMES=[['chess','♞','Chess','#81b64c','#0f1a07'],['checkers','●','Checkers','#d9452f','#ffffff'],['ludo','⚄','Ludo','#fdd835','#1a1500'],['tictactoe','✕','Tic-Tac-Toe','#4fc3f7','#00212e'],['connect4','◍','Connect Four','#ffb300','#1a1100'],['reversi','◐','Reversi','#26a69a','#00201d'],['gomoku','◎','Gomoku','#ab47bc','#ffffff']],GN=Object.fromEntries(GAMES.map(g=>[g[0],g[2]]));
 try{const q=new URLSearchParams(location.search).get('ref');if(q)localStorage.ref=q.replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12)}catch(e){}
 const api=async(p,b)=>(await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:b&&JSON.stringify(b)})).json().catch(()=>({error:'Server error'}));
-function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.classList.add('out');setTimeout(()=>d.remove(),260)},3000)}
+function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=cs(m);document.body.appendChild(d);setTimeout(()=>{d.classList.add('out');setTimeout(()=>d.remove(),260)},3000)}
 function tiles(){const g=GAMES.find(x=>x[0]==G),st=document.body.style;st.setProperty('--ac',g[3]);st.setProperty('--acf',g[4]);
  if(!$('tiles').children.length)$('tiles').innerHTML=GAMES.map(([k,i,n,c,f])=>`<div class="tile" style="--tc:${c};--tf:${f}" onclick="G='${k}';tiles()"><b>${i}</b>${n}</div>`).join('');
  [...$('tiles').children].forEach((el,i)=>el.classList.toggle('on',GAMES[i][0]==G));
@@ -338,7 +339,7 @@ sock.on('lobby',l=>{l.forEach(r=>{if(r.by)r.by=cn(r.by)});LB=l;$('rooms').innerH
  sock.on('pubdel',id=>{pubs=pubs.filter(m=>m.id!=id);pubRender()});
  sock.on('tupdate',u=>{if(!$('p-tour').classList.contains('on')&&$('tdet').classList.contains('hide'))return;tLoad();if(tcur==u.id&&!$('tdet').classList.contains('hide'))tOpen(u.id)});
  sock.on('tmatch',m=>{$('tm').dataset.room=m.room;$('tmi').innerHTML=`<b>${esc(m.tname)}</b><div class="mute" style="margin:8px 0">${m.round==m.rounds?'Final':'Round '+m.round+' of '+m.rounds} · ${GN[m.game]}</div><div>${m.names.map(n=>esc(cn(n))).join(' vs ')}</div><div class="note">Step in within 3 minutes or you forfeit the match.</div>`;$('tm').classList.remove('hide')});
- sock.on('state',s=>{if(s.names)s.names=s.names.map(cn);draw(s)});
+ sock.on('state',s=>{if(s.names)s.names=s.names.map(cn);['result','tnote','note'].forEach(k=>{if(s[k])s[k]=cs(s[k])});if(s.ludo&&s.ludo.msg)s.ludo.msg=cs(s.ludo.msg);draw(s)});
  sock.on('live',l=>{l.forEach(g=>{if(g.names)g.names=g.names.map(cn)});liveL=l;liveRender()})}
 const openTable=()=>sock.emit('open',{game:G,stake:$('stake').value,tc:$('tc').value,live:$('live').checked},r=>toast(r?.error||'Your public table is open. You will be told when someone accepts.'));
 let LB=[];
