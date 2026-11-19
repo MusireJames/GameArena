@@ -1,6 +1,7 @@
 require('dotenv').config(); const crypto = require('crypto');
 const express = require('express'), http = require('http'), { Server } = require('socket.io'), Database = require('better-sqlite3'),
   bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken'), { Chess } = require('chess.js'), messaging = require('./messaging'), pp = require('./palpluss'), createPayments = require('./payments'), store = require('./store'), BG = require('./boardgames'), FEES = require('./fees');
+const CK = require('./checkers'), BOTS = require('./bots'), { ckSide, ckMoves } = CK;
 const E = process.env, FEE = +E.PLATFORM_FEE || 0.1;
 const PROD = E.NODE_ENV === 'production' || !!E.RENDER || E.FORCE_PRODUCTION === '1', STAKES = E.STAKES_ENABLED !== '0';   // Render counts as production even if NODE_ENV was forgotten
 // There is NO public default secret: a secret that is known to everyone lets anyone forge a login as any player.
@@ -24,7 +25,7 @@ const db = store.open(Database, E.DB_FILE || 'data.db');   // WAL + synchronous=
 db.exec(`create table if not exists users(id integer primary key, phone text unique, name text, hash text, balance integer default 0);
 create table if not exists txs(id integer primary key, uid integer, type text, amount integer, ref text, status text default 'pending', created text default current_timestamp)`);
 try { db.exec('alter table tournaments add column live integer default 0'); } catch {}   // tournaments can be made live (watchable) by their creator
-for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text']) try { db.exec('alter table users add column ' + c); } catch {}
+for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text', 'is_bot integer default 0', 'ref_code text', 'referred_by integer', 'ref_paid integer default 0']) try { db.exec('alter table users add column ' + c); } catch {}
 // Every account gets a random permanent id. Login tokens carry it, so a token can never be mistaken for another person's account
 // (account numbers 1, 2, 3... are re-used if a database is ever replaced, and that is how people ended up in each other's accounts).
 db.exec(`update users set uuid=lower(hex(randomblob(16))) where uuid is null;
@@ -43,6 +44,26 @@ create table if not exists flags(id integer primary key, note text, created text
 create table if not exists escrow(rid integer, uid integer, amount integer, primary key(rid, uid))`);
 db.exec("insert into ledger(uid,amount,note) select id,balance,'opening balance' from users where balance!=0 and id not in (select uid from ledger)");
 try { db.exec('create unique index if not exists ux_email on users(email) where email is not null'); } catch {}
+db.exec(`create table if not exists bonuses(id integer primary key, uid integer, amount integer, at integer, unlocked integer default 0, ref_uid integer, created text default current_timestamp);
+create unique index if not exists ux_ref_code on users(ref_code) where ref_code is not null`);
+// ---- Referrals: the inviter gets a bonus when a friend who joined with the link makes a deposit. The bonus is locked (cannot be withdrawn) until the inviter has played a staked game. ----
+const REF_ON = E.REFERRALS !== '0', REF_BONUS = +E.REFERRAL_BONUS || 10, REF_MIN = +E.REFERRAL_MIN_DEPOSIT || 50, REF_MAX = +E.REFERRAL_MAX_PER_USER || 20;
+function newRef() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; for (;;) { let c = ''; for (let i = 0; i < 6; i++) c += A[crypto.randomInt(0, A.length)]; if (!db.prepare('select 1 from users where ref_code=?').get(c)) return c; } }
+const ensureRef = id => { let c = db.prepare('select ref_code c from users where id=?').get(id)?.c; if (!c) { c = newRef(); db.prepare('update users set ref_code=? where id=?').run(c, id); } return c; };
+db.prepare('select id from users where ref_code is null and is_bot=0').all().forEach(u => ensureRef(u.id));
+const refUser = code => { code = String(code || '').trim().toUpperCase(); return /^[A-Z0-9]{4,10}$/.test(code) ? db.prepare('select id from users where ref_code=? and is_bot=0').get(code)?.id || null : null; };
+const lockedOf = uid => db.prepare('select coalesce(sum(amount),0) s from bonuses where uid=? and unlocked=0').get(uid).s;
+function refBonus(uid, amt) {   // called after a deposit has been credited
+  if (!REF_ON || amt < REF_MIN) return;
+  const u = db.prepare('select name, referred_by rb, ref_paid rp, ip from users where id=?').get(uid); if (!u || !u.rb || u.rp) return;
+  const ref = db.prepare('select id, ip from users where id=? and is_bot=0').get(u.rb); if (!ref) return;
+  const skip = why => { db.prepare('update users set ref_paid=2 where id=? and ref_paid=0').run(uid); if (why) db.prepare('insert into flags(note) values(?)').run(why); };
+  if (db.prepare('select count(*) c from bonuses where uid=?').get(ref.id).c >= REF_MAX) return skip('Referral bonus not paid: account ' + ref.id + ' reached the limit of ' + REF_MAX + ' referral bonuses.');
+  if (u.ip && ref.ip && u.ip === ref.ip) return skip('Referral bonus not paid: accounts ' + ref.id + ' and ' + uid + ' use the same internet address (possible self-referral). If they are real friends, pay it by hand.');
+  let paid = false;
+  txn(() => { if (db.prepare('update users set ref_paid=1 where id=? and ref_paid=0').run(uid).changes) { add(ref.id, REF_BONUS, 'referral bonus'); db.prepare('insert into bonuses(uid,amount,at,ref_uid) values(?,?,?,?)').run(ref.id, REF_BONUS, Date.now(), uid); paid = true; } });
+  if (paid) { pushBal(ref.id); online.get(ref.id)?.emit('note', 'You earned KES ' + REF_BONUS + ': ' + u.name + ' joined with your link and deposited. Play one staked game to unlock it for withdrawal.'); }
+}
 const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '4mb', verify: (req, res, buf) => { req.rawBody = buf; } })); app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' });
   if (PROD) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains'); next(); });
 app.use('/api', (req, res, next) => { res.set({ 'Cache-Control': 'no-store', Vary: 'Authorization' }); next(); });
@@ -78,7 +99,7 @@ const limit = (n, ms) => (req, res, next) => { const k = req.ip + req.baseUrl + 
   if (a.length >= n) return res.status(429).json({ error: 'Too many attempts. Please wait a minute.' }); a.push(now); hits.set(k, a); next(); };
 app.use(['/api/login', '/api/register', '/api/otp', '/api/reset'], limit(30, 60000));   // per endpoint, per IP (many phones share one IP on mobile networks)
 app.use(['/api/deposit', '/api/withdraw'], limit(12, 60000)); app.use('/api/tournaments', limit(60, 60000));
-app.get('/api/leaderboard', (req, res) => res.json(db.prepare("select name, rating from users u order by rating desc limit 10").all()));
+app.get('/api/leaderboard', (req, res) => res.json(db.prepare("select name, rating from users u where is_bot=0 order by rating desc limit 10").all()));
 app.get('/api/history', auth, (req, res) => {
   const a = db.prepare("select type t, '' label, amount, status, created at from txs where uid=? order by id desc limit 20").all(req.uid);
   const b = db.prepare("select 'game' t, game label, net amount, result status, created at from plays where uid=? order by id desc limit 20").all(req.uid);
@@ -93,7 +114,9 @@ app.post('/api/limits', auth, (req, res) => {   // responsible play: daily depos
 const admin = (req, res, next) => isAdmin(req.uid) ? next() : res.status(403).json({ error: 'Admins only' });
 app.get('/api/admin/summary', auth, admin, async (req, res) => {
   const n = q => db.prepare(q).get().v;
-  res.json({ users: n('select count(*) v from users'), balances: n('select coalesce(sum(balance),0) v from users'),
+  res.json({ users: n('select count(*) v from users where is_bot=0'), balances: n('select coalesce(sum(balance),0) v from users where is_bot=0'),
+    botNet: n("select coalesce(sum(net),0) v from plays where uid in (select id from users where is_bot=1)"), botToday: -botLossToday(), botGames: n("select count(*) v from plays where uid in (select id from users where is_bot=1)"),
+    refPaid: n('select coalesce(sum(amount),0) v from bonuses'), refCount: n('select count(*) v from bonuses'), refLocked: n('select coalesce(sum(amount),0) v from bonuses where unlocked=0'),
     deposits: n("select coalesce(sum(amount),0) v from txs where type='deposit' and status='done'"),
     withdrawals: n("select coalesce(sum(amount),0) v from txs where type='withdraw' and status='done'"),
     fees: n('select coalesce(sum(amount),0) v from house'),
@@ -109,7 +132,7 @@ app.get('/api/admin/summary', auth, admin, async (req, res) => {
 });
 // ---- Deposits (STK Push) and withdrawals (B2C) through PalPluss. All the money logic is in payments.js and is tested in payments.test.js ----
 const alertAdmin = text => { console.warn('ALERT:', text); try { db.prepare('insert into flags(note) values(?)').run('ALERT: ' + String(text).slice(0, 480)); } catch {} if (E.ADMIN_EMAIL) messaging.notify(E.ADMIN_EMAIL, 'GameArena alert', text).catch(e => console.error('Alert email failed:', e.message)); };
-const pay = createPayments({ db, add, pushBal, pp, alert: alertAdmin, baseUrl: E.BASE_URL || '', secret: CB_SECRET });
+const pay = createPayments({ db, add, pushBal, pp, alert: alertAdmin, baseUrl: E.BASE_URL || '', secret: CB_SECRET, locked: lockedOf, onDeposited: refBonus });
 const svc = { at: 0, v: null }; const svcBalance = async () => { if (Date.now() - svc.at > 60000) { svc.at = Date.now(); try { svc.v = await pp.serviceBalance(); } catch { svc.v = null; } } return svc.v; };
 app.post('/api/palpluss/webhook/:secret/:id', (req, res) => {   // PalPluss does not sign webhooks, so this is only a nudge: payments.js confirms the result with PalPluss before moving any money
   const a = Buffer.from(String(req.params.secret)), b = Buffer.from(CB_SECRET);
@@ -139,7 +162,8 @@ app.post('/api/google/complete', (req, res) => {
   if (!dob || !((Date.now() - new Date(dob)) / 3.15576e10 >= 18)) return res.status(400).json({ error: 'You must be 18 or older to register' });
   if (db.prepare('select 1 from users where phone=?').get(ph)) return res.status(400).json({ error: 'This phone number is already registered' });
   try { const u = db.prepare('insert into users(phone,name,hash,dob,email,channel,verified,ip) values(?,?,?,?,?,?,1,?)').run(ph, String(g.gname || 'Player').slice(0, 20), bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 10), dob, g.gem, 'email', req.ip);
-    res.json({ token: tok(u.lastInsertRowid) }); }
+    const nid = u.lastInsertRowid; ensureRef(nid); const rf = refUser(req.body.ref); if (rf && rf !== nid) db.prepare('update users set referred_by=? where id=?').run(rf, nid);
+    res.json({ token: tok(nid) }); }
   catch { res.status(400).json({ error: 'This email or phone number is already registered' }); }
 });
 app.post('/api/kyc', auth, (req, res) => {
@@ -192,13 +216,13 @@ app.post('/api/register/start', async (req, res) => {
   if ((ch === 'email' || em) && !emailOk(em)) return res.status(400).json({ error: 'Enter a valid email address' });
   if (db.prepare('select 1 from users where phone=?').get(ph)) return res.status(400).json({ error: 'This phone number is already registered' });
   if (em && db.prepare('select 1 from users where email=?').get(em)) return res.status(400).json({ error: 'This email is already registered' });
-  try { res.json({ ok: true, ...await issueOtp(ph, 'signup', { phone: ph, name: String(name || 'Player').slice(0, 20), hash: bcrypt.hashSync(password, 10), dob, email: em || null, channel: ch, ip: req.ip }, ch, ch === 'email' ? em : ph) }); }
+  try { res.json({ ok: true, ...await issueOtp(ph, 'signup', { phone: ph, name: String(name || 'Player').slice(0, 20), hash: bcrypt.hashSync(password, 10), dob, email: em || null, channel: ch, ip: req.ip, ref: String(req.body.ref || '').slice(0, 12) }, ch, ch === 'email' ? em : ph) }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.post('/api/register/verify', (req, res) => {
   const r = checkOtp(norm(req.body.phone || ''), 'signup', req.body.code); if (r.error) return res.status(400).json(r);
   const p = r.payload;
-  try { const u = db.prepare('insert into users(phone,name,hash,dob,email,channel,verified,ip) values(?,?,?,?,?,?,1,?)').run(p.phone, p.name, p.hash, p.dob, p.email, p.channel, p.ip); res.json({ token: tok(u.lastInsertRowid) }); }
+  try { const u = db.prepare('insert into users(phone,name,hash,dob,email,channel,verified,ip) values(?,?,?,?,?,?,1,?)').run(p.phone, p.name, p.hash, p.dob, p.email, p.channel, p.ip); const nid = u.lastInsertRowid; ensureRef(nid); const rf = refUser(p.ref); if (rf && rf !== nid) db.prepare('update users set referred_by=? where id=?').run(rf, nid); res.json({ token: tok(nid) }); }
   catch { res.status(400).json({ error: 'This phone number or email is already registered' }); }
 });
 const finishLogin = (id, req, res) => { db.prepare('update users set ip=? where id=?').run(req.ip, id); res.json({ token: tok(id) }); };
@@ -239,7 +263,12 @@ app.post('/api/otp/resend', async (req, res) => {
   const { _ch, _dest, ...p } = JSON.parse(o.payload);
   try { res.json({ ok: true, ...await issueOtp(ph, purpose, p, _ch, _dest) }); } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/api/me', auth, (req, res) => res.json({ ...db.prepare('select id,name,phone,balance,rating,daily_limit,excluded_until,kyc from users where id=?').get(req.uid), admin: isAdmin(req.uid) }));
+app.get('/api/me', auth, (req, res) => { const u = db.prepare('select id,name,phone,balance,rating,daily_limit,excluded_until,kyc from users where id=?').get(req.uid); res.json({ ...u, locked: Math.min(u.balance, lockedOf(req.uid)), admin: isAdmin(req.uid) }); });
+app.get('/api/referral', auth, (req, res) => {
+  const code = ensureRef(req.uid), q = s => db.prepare(s).get(req.uid);
+  res.json({ on: REF_ON, code, link: (E.BASE_URL || '').replace(/\/$/, '') + '/?ref=' + code, bonus: REF_BONUS, min: REF_MIN,
+    invited: q('select count(*) v from users where referred_by=?').v, rewarded: q('select count(*) v from bonuses where uid=?').v, earned: q('select coalesce(sum(amount),0) v from bonuses where uid=?').v, locked: lockedOf(req.uid) });
+});
 
 // ---- Deposit (M-Pesa STK Push) and withdraw (M-Pesa B2C), both through PalPluss ----
 app.get('/api/quote', (req, res) => {   // what a deposit or withdrawal of this amount costs the player (PalPluss fees are paid by the player)
@@ -279,22 +308,6 @@ app.post('/api/withdraw', auth, (req, res) => {   // the wallet is debited at on
 const rooms = new Map(), online = new Map(); let rid = 1;
 // Ludo (2 players, 4 tokens each). pos: -1 yard, 0-50 main track, 51-55 home lane, 56 home.
 const SAFE = [0, 8, 13, 21, 26, 34, 39, 47];
-// Checkers (American rules: forced captures, multi-jumps, kings). Board = 64 cells; w/W = player 1, b/B = player 2.
-const ckSide = p => p.toLowerCase() === 'w' ? 0 : 1;
-const ckDirs = p => p === 'w' ? [[-1,-1],[-1,1]] : p === 'b' ? [[1,-1],[1,1]] : [[-1,-1],[-1,1],[1,-1],[1,1]];
-function ckMoves(b, side, only) {
-  const caps = [], steps = [];
-  for (let i = 0; i < 64; i++) {
-    const p = b[i]; if (!p || ckSide(p) !== side || (only != null && i !== only)) continue;
-    for (const [dr, dc] of ckDirs(p)) {
-      const r1 = (i >> 3) + dr, c1 = (i & 7) + dc; if (r1 < 0 || r1 > 7 || c1 < 0 || c1 > 7) continue;
-      const j = r1 * 8 + c1;
-      if (!b[j]) steps.push({ from: i, to: j });
-      else if (ckSide(b[j]) !== side) { const r2 = r1 + dr, c2 = c1 + dc; if (r2 >= 0 && r2 < 8 && c2 >= 0 && c2 < 8 && !b[r2 * 8 + c2]) caps.push({ from: i, to: r2 * 8 + c2, cap: j }); }
-    }
-  }
-  return caps.length ? caps : (only != null ? [] : steps);
-}
 const tcParse = tc => { const [m, i] = String(tc || '10+0').split('+').map(Number), ok = m > 0 && m <= 60 && i >= 0 && i <= 60, M = ok ? m : 10, I = ok ? i : 0; return { clock: [M * 6e4, M * 6e4], inc: I * 1e3, tc: M + '+' + I }; };
 const mkCode = () => { let c; do c = crypto.randomBytes(3).toString('hex').toUpperCase(); while ([...rooms.values()].some(r => r.code === c)); return c; };
 const GAME_IDS = ['chess', 'tictactoe', 'ludo', 'checkers', ...BG.names];
@@ -306,23 +319,26 @@ const lobby = () => [...rooms.values()].filter(r => r.listed && !r.started && r.
 const specN = id => io.sockets.adapter.rooms.get('v' + id)?.size || 0;   // how many people are watching a game
 const liveList = () => [...rooms.values()].filter(r => r.live && r.started && !r.over).map(r => ({ id: r.id, game: r.game, stake: r.stake, names: r.names, w: specN(r.id), t: !!r.tid }));
 let liveT = null; const liveTick = () => { if (liveT) return; liveT = setTimeout(() => { liveT = null; io.emit('live', liveList()); }, 300); };   // tell everyone, at most a few times a second
-const view = r => ({ id: r.id, live: !!r.live, w: specN(r.id), game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
+const view = r => ({ id: r.id, live: !!r.live, w: specN(r.id), game: r.game, stake: r.stake, ck: r.ck, ckm: r.ck && !r.over ? ckMoves(r.ck, r.turn, r.mustFrom) : [], left: r.started && !r.over ? Math.max(0, r.deadline - Date.now()) : null, tid: r.tid, tnote: r.tnote, bots: r.bots, lm: r.lm, chk: !!(r.chess && r.chess.inCheck()), line: r.line, winner: r.winner, pay: r.pay, drawBy: r.drawBy, tc: r.tc, clk: r.clock && r.started && !r.over ? r.clock.map((v, i) => i === r.turn ? Math.max(0, r.deadline - Date.now()) : v) : null, code: r.code, started: r.started, ready: r.ready, size: r.size, out: r.out, names: r.names, players: r.players, over: r.over, result: r.result, turn: r.turn, fen: r.chess ? r.chess.fen() : null, board: r.board, mv: BG.is(r.game) && r.started && !r.over ? BG.legal(r.game, r.board, r.turn) : [], note: r.note, ludo: r.ludo ? { msg: r.ludo.msg, seat: r.ludo.seat, pos: r.ludo.pos, die: r.ludo.die, last: r.ludo.last, movable: r.ludo.die ? lmov(r.ludo, r.turn) : [] } : null });
 const TURN = { chess: 120000, checkers: 60000, ludo: 30000, tictactoe: 20000 };   // per-move time limits
-const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); io.to('r' + r.id).emit('state', view(r)); if (r.live) io.to('v' + r.id).emit('state', view(r)); };
+const send = r => { if (r.started && !r.over) r.deadline = r.clock ? r.t0 + r.clock[r.turn] : Date.now() + (BG.is(r.game) ? BG.turnMs(r.game) : TURN[r.game]); io.to('r' + r.id).emit('state', view(r)); if (r.live) io.to('v' + r.id).emit('state', view(r)); botKick(r); };
 function finish(r, winner, text) {   // winner = user id, or null for a draw (stakes refunded)
   if (r.over) return; r.over = true; r.result = text;
   const pot = r.stake * r.players.length, pay = Math.floor(pot * (1 - FEE)); r.winner = winner; r.pay = pay;
   if (r.stake) { txn(() => { winner == null ? r.players.forEach(p => add(p, r.stake, 'draw refund')) : add(winner, pay, 'winnings'); if (winner != null) db.prepare('insert into house(amount) values(?)').run(pot - pay); db.prepare('delete from escrow where rid=?').run(r.id); }); r.players.forEach(pushBal); }
-  const pair = r.players.length === 2 ? r.players.slice().sort().join('-') : null;
+  const pair = r.players.length === 2 && !r.bots ? r.players.slice().sort().join('-') : null;
   r.players.forEach(p => { const res = winner == null ? 'draw' : p === winner ? 'win' : 'loss';
     db.prepare('insert into plays(uid,game,stake,result,net,pair) values(?,?,?,?,?,?)').run(p, r.game, r.stake, res, res === 'win' ? pay - r.stake : res === 'loss' ? -r.stake : 0, pair); });
-  if (winner != null) { const W = db.prepare('select rating from users where id=?').get(winner).rating; let gain = 0;
+  if (winner != null && !r.bots) { const W = db.prepare('select rating from users where id=?').get(winner).rating; let gain = 0;
     r.players.forEach(p => { if (p === winner) return; const L = db.prepare('select rating from users where id=?').get(p).rating;
       const d = Math.round(24 / (1 + Math.pow(10, (W - L) / 400))); gain += d; db.prepare('update users set rating=max(100,rating-?) where id=?').run(d, p); });
     db.prepare('update users set rating=rating+? where id=?').run(gain, winner); }
   if (r.stake && pair) { const ips = r.players.map(p => db.prepare('select ip from users where id=?').get(p).ip); if (ips[0] && ips[0] === ips[1]) db.prepare('insert into flags(note) values(?)').run('Same IP: accounts ' + pair + ' played a staked game from one address'); }
   if (r.stake && pair) { const n = db.prepare("select count(*) c from plays where pair=? and stake>0 and created>datetime('now','-1 day')").get(pair).c / 2;
     if (n >= 5) db.prepare('insert into flags(note) values(?)').run('Possible collusion: accounts ' + pair + ' played ' + n + ' staked games in 24h'); }
+  if (r.stake && r.startedAt && Date.now() - r.startedAt >= 20000) r.players.forEach((p, i) => {   // a referral bonus unlocks once its owner has played a real staked game that started after the bonus
+    if (r.bots && r.bots[i]) return;
+    if (db.prepare('update bonuses set unlocked=1 where uid=? and unlocked=0 and at<?').run(p, r.startedAt).changes) { pushBal(p); online.get(p)?.emit('note', 'Your referral bonus is now unlocked. You can withdraw it.'); online.get(p)?.emit('refresh'); } });
   if (r.mid) tMatchDone(r, winner);
   send(r); liveTick(); setTimeout(() => { rooms.delete(r.id); liveTick(); }, 60000);
 }
@@ -349,7 +365,7 @@ setInterval(() => rooms.forEach(r => {
   if (now > r.deadline) timeout(r);
 }), 1000);
 function begin(r) {   // called when the host starts and everyone is ready
-  r.started = true; const n = r.players.length; liveTick();
+  r.started = true; r.startedAt = Date.now(); const n = r.players.length; liveTick();
   for (const u of r.players) { closeOpen(u, 'Your other open tables were closed because you started a game. Stakes returned.'); const ps = online.get(u); if (ps && ps.spec) { ps.leave('v' + ps.spec); ps.spec = null; } }
   if (r.game === 'chess') { r.chess = new Chess(); if (!r.clock) { r.clock = [6e5, 6e5]; r.inc = 0; } r.t0 = Date.now(); }
   else if (r.game === 'ludo') r.ludo = { pos: r.players.map(() => [-1, -1, -1, -1]), die: null, last: null, seat: n === 2 ? [0, 2] : [0, 1, 2, 3].slice(0, n) };
@@ -537,7 +553,94 @@ const PUB_BAD = /(https?:|www\.|\b[a-z0-9-]{2,}\.(com|co|ke|net|org|me|io|app|xy
 const pubShape = r => ({ id: r.id, uid: r.uid, name: r.name, text: r.text, at: new Date(String(r.created).replace(' ', 'T') + 'Z').getTime(),
   rp: r.reply_to ? { id: r.reply_to, uid: r.pu, name: r.pn || 'Deleted', text: r.pt ? r.pt.slice(0, 90) : '(message deleted)' } : null });
 const pubRows = () => db.prepare('select c.*, p.name pn, p.text pt, p.uid pu from chat c left join chat p on p.id=c.reply_to order by c.id desc limit 80').all().reverse().map(pubShape);
+// ---- Bots: a clearly labelled computer opponent, offered ONLY to a player who has waited in "Find opponent" with nobody to play and who says yes. ----
+const BOT_ON = E.BOTS !== '0', BOT_MAX = +E.BOT_MAX_STAKE || 50, BOT_WAIT = (+E.BOT_WAIT_SECONDS || 20) * 1000, BOT_LOSS = +E.BOT_DAILY_LOSS || 300;
+BOTS.NAMES.forEach(n => db.prepare("insert or ignore into users(phone,name,hash,is_bot,verified,rating) values(?,?,'!',1,1,1000)").run('bot-' + n.toLowerCase(), '🤖 Bot ' + n));
+function botLossToday() { return -db.prepare("select coalesce(sum(net),0) s from plays where uid in (select id from users where is_bot=1) and created > datetime('now','-1 day')").get().s; }
+function pickBotUser(stake) {
+  const used = new Set(); rooms.forEach(r => { if (r.bots && !r.over) r.players.forEach((p, i) => { if (r.bots[i]) used.add(p); }); });
+  const free = db.prepare('select id, name from users where is_bot=1').all().filter(b => !used.has(b.id)); if (!free.length) return null;
+  const b = free[crypto.randomInt(0, free.length)]; if (stake && bal(b.id) < stake) add(b.id, 500, 'bot bankroll'); return b;   // the bot plays with house money, capped per day by BOT_DAILY_LOSS
+}
+function botKick(r) {   // called after every state change: if it is a bot's turn, move after a short, human-like pause
+  if (!r.bots || !r.started || r.over || r.botT || !r.bots[r.turn]) return;
+  r.botT = setTimeout(() => { r.botT = null; botAct(r); }, 1000 + crypto.randomInt(0, 2000));
+}
+function botAct(r) {
+  if (!rooms.has(r.id) || r.over || !r.started || !r.bots[r.turn]) return;
+  const i = r.turn, uid = r.players[i];
+  try {
+    if (r.game === 'ludo' && !r.ludo.die) return doRoll(r, uid);
+    const m = BOTS.pickMove(r, i, { lmov, SAFE });
+    if (m) doMove(r, uid, r.names[i], m); else if (r.game === 'ludo') { r.ludo.die = null; nextTurn(r); send(r); }
+  } catch (e) { console.error('Bot error:', e); }
+}
+function botScan() {   // someone has been waiting a while with nobody to play: offer a bot (they must accept)
+  if (!BOT_ON) return; const now = Date.now();
+  queue.forEach((q, key) => { const [game, stake, n] = key.split(':'); if (+n !== 2 || +stake > BOT_MAX) return;
+    if (+stake > 0 && botLossToday() >= BOT_LOSS) return;
+    q.forEach(u => { const s = online.get(u), t = qt.get(u); if (!s || !t || s.pid || s.botAsk === t || now - t < BOT_WAIT) return; s.botAsk = t; s.emit('botOffer', { game, stake: +stake, max: BOT_MAX }); }); });
+}
+setInterval(botScan, 2000);
 setInterval(() => queue.forEach((_, k) => matchmake(k)), 2000);
+function doMove(r, uid, me, m) {   // one move by a person or a bot; every rule check lives here
+  if (!r || r.over || !r.started || r.players[r.turn] !== uid) return;
+    r.drawBy = null;
+    if (r.game === 'ludo') {
+      const L = r.ludo, p = r.turn, t = m.t, st = L.seat[p] * 13;
+      if (!L.die || !lmov(L, p).includes(t)) return;
+      const d = L.die; L.die = null; L.msg = null; let captured = false;
+      const n = L.pos[p][t] = L.pos[p][t] < 0 ? 0 : L.pos[p][t] + d;
+      if (n <= 50) { const g = (st + n) % 52;
+        if (!SAFE.includes(g)) L.pos.forEach((arr, q) => { if (q !== p) L.pos[q] = arr.map(y => { const hit = y >= 0 && y <= 50 && (L.seat[q] * 13 + y) % 52 === g; if (hit) captured = true; return hit ? -1 : y; }); }); }
+      if (L.pos[p].every(y => y === 56)) return finish(r, uid, me + ' wins');
+      if (captured) L.msg = me + ' captured a piece! Roll again'; else if (d === 6) L.msg = me + ' rolled a six! Roll again';
+      if (d !== 6 && !captured) nextTurn(r);   // a six or a capture earns another roll
+      return send(r);
+    }
+    if (r.game === 'checkers') {
+      const side = r.turn, from = m.from, to = m.to;
+      const mv = ckMoves(r.ck, side, r.mustFrom).find(x => x.from === from && x.to === to); if (!mv) return;
+      const res = CK.ckApply(r.ck, side, mv, r.mustFrom); r.ck = res.b; r.lm = [from, to]; r.mustFrom = res.mustFrom;
+      if (res.winner != null) return finish(r, uid, me + ' wins');
+      if (res.side !== side) nextTurn(r);
+      return send(r);
+    }
+    if (BG.is(r.game)) {   // Connect Four, Gomoku, Reversi: rules live in boardgames.js
+      const t = BG.play(r.game, r.board, r.turn, m); if (!t) return;
+      r.board = t.board; r.lm = t.lm; r.note = t.note ? r.names[r.turn] + ' ' + t.note : null;
+      if (t.over) { r.line = t.over.line; const w = t.over.winner; r.turn = t.next; return finish(r, w == null ? null : r.players[w], w == null ? t.over.text : r.names[w] + ' wins (' + t.over.text + ')'); }
+      r.turn = t.next; return send(r);
+    }
+    if (r.game === 'chess') {
+      try { r.chess.move({ from: m.from, to: m.to, promotion: 'q' }); } catch { return; }
+      { const now = Date.now(); r.clock[r.turn] += r.inc - (now - r.t0); r.t0 = now; }
+      r.lm = [m.from, m.to];
+      nextTurn(r);
+      if (r.chess.isCheckmate()) return finish(r, uid, me + ' wins by checkmate');
+      if (r.chess.isDraw()) return finish(r, null, 'Draw. Stakes refunded');
+    } else {
+      const i = m.i, b = r.board; if (!(i >= 0 && i < 9) || b[i]) return;
+      b[i] = r.turn ? 'O' : 'X'; r.lm = i; nextTurn(r);
+      const L = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+      const wl = L.find(l => b[l[0]] && l.every(k => b[k] === b[l[0]])); if (wl) { r.line = wl; return finish(r, uid, me + ' wins'); }
+      if (b.every(x => x)) return finish(r, null, 'Draw. Stakes refunded');
+    }
+    send(r);
+}
+function doRoll(r, uid) {   // dice are rolled on the server with a cryptographic RNG, for people and bots alike
+  if (!r || r.over || r.game !== 'ludo' || !r.started || r.players[r.turn] !== uid || r.ludo.die) return;
+    const L = r.ludo, p = r.turn; let d = TEST_DICE.length ? TEST_DICE.shift() : crypto.randomInt(1, 7);
+    L.msg = null; L.dry = L.dry || [];
+    if (!L.pos[p].some(x => x >= 0)) {   // catch-up rule: all pieces in the yard while an opponent is out => a six within 2 rolls
+      const oppOut = L.pos.some((ps, q) => q !== p && !r.out[q] && ps.some(x => x >= 0));
+      if (d !== 6 && oppOut && (L.dry[p] || 0) >= 1) d = 6;
+      L.dry[p] = d === 6 ? 0 : (L.dry[p] || 0) + 1;
+    } else L.dry[p] = 0;
+    L.die = L.last = d;
+    if (!lmov(L, r.turn).length) { L.die = null; nextTurn(r); }
+    send(r);
+}
 io.on('connection', s => {
   const uid = s.uid; online.set(uid, s); io.emit('online', online.size);
   const me = db.prepare('select name from users where id=?').get(uid).name;
@@ -604,68 +707,8 @@ io.on('connection', s => {
     if (!r || r.started || r.players[0] !== uid || r.players.length < 2 || !r.ready.every(Boolean)) return;
     begin(r); io.emit('lobby', lobby()); send(r);
   });
-  s.on('move', m => {
-    const r = rooms.get(s.rid); if (!r || r.over || !r.started || r.players[r.turn] !== uid) return;
-    r.drawBy = null;
-    if (r.game === 'ludo') {
-      const L = r.ludo, p = r.turn, t = m.t, st = L.seat[p] * 13;
-      if (!L.die || !lmov(L, p).includes(t)) return;
-      const d = L.die; L.die = null; L.msg = null; let captured = false;
-      const n = L.pos[p][t] = L.pos[p][t] < 0 ? 0 : L.pos[p][t] + d;
-      if (n <= 50) { const g = (st + n) % 52;
-        if (!SAFE.includes(g)) L.pos.forEach((arr, q) => { if (q !== p) L.pos[q] = arr.map(y => { const hit = y >= 0 && y <= 50 && (L.seat[q] * 13 + y) % 52 === g; if (hit) captured = true; return hit ? -1 : y; }); }); }
-      if (L.pos[p].every(y => y === 56)) return finish(r, uid, me + ' wins');
-      if (captured) L.msg = me + ' captured a piece! Roll again'; else if (d === 6) L.msg = me + ' rolled a six! Roll again';
-      if (d !== 6 && !captured) nextTurn(r);   // a six or a capture earns another roll
-      return send(r);
-    }
-    if (r.game === 'checkers') {
-      const b = r.ck, side = r.turn, from = m.from, to = m.to;
-      const mv = ckMoves(b, side, r.mustFrom).find(x => x.from === from && x.to === to); if (!mv) return;
-      const p = b[from]; b[to] = p; b[from] = 0; let king = false; r.lm = [from, to];
-      if ((p === 'w' && (to >> 3) === 0) || (p === 'b' && (to >> 3) === 7)) { b[to] = p.toUpperCase(); king = true; }
-      r.mustFrom = null;
-      if (mv.cap != null) { b[mv.cap] = 0; if (!king && ckMoves(b, side, to).length) r.mustFrom = to; }
-      if (r.mustFrom == null) { nextTurn(r); const o = r.turn;
-        if (!b.some(x => x && ckSide(x) === o) || !ckMoves(b, o).length) return finish(r, uid, me + ' wins'); }
-      return send(r);
-    }
-    if (BG.is(r.game)) {   // Connect Four, Gomoku, Reversi: rules live in boardgames.js
-      const t = BG.play(r.game, r.board, r.turn, m); if (!t) return;
-      r.board = t.board; r.lm = t.lm; r.note = t.note ? r.names[r.turn] + ' ' + t.note : null;
-      if (t.over) { r.line = t.over.line; const w = t.over.winner; r.turn = t.next; return finish(r, w == null ? null : r.players[w], w == null ? t.over.text : r.names[w] + ' wins (' + t.over.text + ')'); }
-      r.turn = t.next; return send(r);
-    }
-    if (r.game === 'chess') {
-      try { r.chess.move({ from: m.from, to: m.to, promotion: 'q' }); } catch { return; }
-      { const now = Date.now(); r.clock[r.turn] += r.inc - (now - r.t0); r.t0 = now; }
-      r.lm = [m.from, m.to];
-      nextTurn(r);
-      if (r.chess.isCheckmate()) return finish(r, uid, me + ' wins by checkmate');
-      if (r.chess.isDraw()) return finish(r, null, 'Draw. Stakes refunded');
-    } else {
-      const i = m.i, b = r.board; if (!(i >= 0 && i < 9) || b[i]) return;
-      b[i] = r.turn ? 'O' : 'X'; r.lm = i; nextTurn(r);
-      const L = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-      const wl = L.find(l => b[l[0]] && l.every(k => b[k] === b[l[0]])); if (wl) { r.line = wl; return finish(r, uid, me + ' wins'); }
-      if (b.every(x => x)) return finish(r, null, 'Draw. Stakes refunded');
-    }
-    send(r);
-  });
-  s.on('roll', () => {   // dice are rolled on the server with a cryptographic RNG
-    const r = rooms.get(s.rid);
-    if (!r || r.over || r.game !== 'ludo' || !r.started || r.players[r.turn] !== uid || r.ludo.die) return;
-    const L = r.ludo, p = r.turn; let d = TEST_DICE.length ? TEST_DICE.shift() : crypto.randomInt(1, 7);
-    L.msg = null; L.dry = L.dry || [];
-    if (!L.pos[p].some(x => x >= 0)) {   // catch-up rule: all pieces in the yard while an opponent is out => a six within 2 rolls
-      const oppOut = L.pos.some((ps, q) => q !== p && !r.out[q] && ps.some(x => x >= 0));
-      if (d !== 6 && oppOut && (L.dry[p] || 0) >= 1) d = 6;
-      L.dry[p] = d === 6 ? 0 : (L.dry[p] || 0) + 1;
-    } else L.dry[p] = 0;
-    L.die = L.last = d;
-    if (!lmov(L, r.turn).length) { L.die = null; nextTurn(r); }
-    send(r);
-  });
+  s.on('move', m => doMove(rooms.get(s.rid), uid, me, m));
+  s.on('roll', () => doRoll(rooms.get(s.rid), uid));
   s.on('find', ({ game, stake, size }, cb) => {
     stake = Math.floor(+stake) || 0; const n = game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+size) || 2)) : 2;
     if (!GAME_IDS.includes(game) || stake < 0) return;
@@ -673,6 +716,21 @@ io.on('connection', s => {
     if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet. Play a free game.' });
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance. You need KES ' + stake });
     unq(uid); enqueue(uid, qkey(game, stake, n)); cb?.({ ok: true });
+  });
+  s.on('playBot', ({ game, stake } = {}, cb) => {
+    stake = Math.floor(+stake) || 0;
+    if (!BOT_ON || !GAME_IDS.includes(game) || stake < 0 || stake > BOT_MAX) return cb?.({ error: 'A bot is not available for this game' });
+    if (busy() || s.pid) return cb?.({ error: 'Finish your current game first' });
+    if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet.' });
+    if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance. You need KES ' + stake });
+    if (stake && botLossToday() >= BOT_LOSS) return cb?.({ error: 'The bots are resting right now. Please wait for a person.' });
+    if (!(queue.get(qkey(game, stake, 2)) || []).includes(uid)) return cb?.({ error: 'Search for an opponent first' });
+    const bot = pickBotUser(stake); if (!bot) return cb?.({ error: 'All bots are busy. Please keep waiting for a person.' });
+    unq(uid); s.emit('queue', false);
+    const first = crypto.randomInt(0, 2) === 0, players = first ? [uid, bot.id] : [bot.id, uid];
+    const r = { id: rid++, game, stake, size: 2, out: [], code: mkCode(), listed: false, started: false, ready: [true, true], players, names: players.map(p => uinfo(p).name), turn: 0, over: false, bots: players.map(p => p === bot.id) };
+    rooms.set(r.id, r); players.forEach(p => hold(r.id, p, stake)); s.join('r' + r.id); s.rid = r.id; pushBal(uid);
+    begin(r); send(r); cb?.({ ok: true, bot: bot.name });
   });
   s.on('cancelFind', () => { unq(uid); s.emit('queue', false); });
   s.on('accept', ({ id }) => { const p = proposals.get(id); if (p) answer(p, uid, true); });
@@ -701,7 +759,7 @@ io.on('connection', s => {
   s.on('legal', ({ sq }, cb) => { const r = rooms.get(s.rid); if (!r || !r.chess || r.over || r.players[r.turn] !== uid || typeof sq !== 'string') return cb?.([]); try { cb?.(r.chess.moves({ square: sq, verbose: true }).map(m => m.to)); } catch { cb?.([]); } });
   let lastChat = 0;
   s.on('chat', t => { const r = rooms.get(s.rid); if (!r || typeof t !== 'string' || !t.trim() || Date.now() - lastChat < 700) return; lastChat = Date.now(); io.to('r' + r.id).emit('chat', { n: me, m: t.slice(0, 200) }); });
-  s.on('drawOffer', () => { const r = rooms.get(s.rid); if (!r || !r.started || r.over || r.game === 'ludo' || r.players.length !== 2 || r.drawBy) return; r.drawBy = uid; send(r); });
+  s.on('drawOffer', () => { const r = rooms.get(s.rid); if (!r || !r.started || r.over || r.game === 'ludo' || r.players.length !== 2 || r.drawBy) return; if (r.bots) return s.emit('note', 'The bot declined your draw offer.'); r.drawBy = uid; send(r); });
   s.on('drawAccept', () => { const r = rooms.get(s.rid); if (!r || !r.started || r.over || !r.drawBy || r.drawBy === uid) return; finish(r, null, 'Draw agreed. Stakes refunded'); });
   s.on('resign', () => leave(s));
   s.on('disconnect', () => {
