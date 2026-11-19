@@ -88,3 +88,15 @@ test('fallback: every game always has a legal move available from the start, and
   assert.equal(B.anyMove({ game: 'ludo', ludo: { pos: [[-1, -1, -1, -1], [-1, -1, -1, -1]], die: 6, seat: [0, 2] } }, 0, { lmov }) != null, true);
   if (Chess) { const c = new Chess(), mv = B.anyMove({ game: 'chess', chess: c }, 0); assert.ok(c.move({ from: mv.from, to: mv.to, promotion: 'q' })); }
 });
+
+test('ludo bot (same rules as the server, no extra luck) beats a random player in at least 80% of games', () => {
+  const SAFE = [0, 8, 13, 21, 26, 34, 39, 47], seats = [0, 2], rnd = n => Math.floor(Math.random() * n);
+  const lmov = (L, p) => L.pos[p].map((x, t) => (x < 0 ? L.die === 6 : x + L.die <= 56) ? t : -1).filter(t => t >= 0);
+  const game = botSeat => { const L = { pos: [[-1,-1,-1,-1],[-1,-1,-1,-1]], die: null, seat: seats }; let p = rnd(2), n = 0;
+    while (n++ < 4000) { L.die = 1 + rnd(6); const ts = lmov(L, p); if (!ts.length) { p = 1 - p; continue; }
+      const t = p === botSeat ? B.ludo(L, p, ts, SAFE, seats) : ts[rnd(ts.length)]; const x = L.pos[p][t], d = L.die, nn = L.pos[p][t] = x < 0 ? 0 : x + d; let cap = false;
+      if (nn <= 50) { const g = (seats[p] * 13 + nn) % 52; if (!SAFE.includes(g)) L.pos.forEach((a, q) => { if (q !== p) L.pos[q] = a.map(y => { const hit = y >= 0 && y <= 50 && (seats[q] * 13 + y) % 52 === g; if (hit) cap = true; return hit ? -1 : y; }); }); }
+      if (L.pos[p].every(y => y === 56)) return p; if (d !== 6 && !cap) p = 1 - p; } return -1; };
+  let w = 0; const N = 400; for (let i = 0; i < N; i++) if (game(i % 2) === i % 2) w++;
+  assert.ok(w / N >= 0.8, 'bot won ' + w + ' of ' + N);
+});
