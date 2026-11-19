@@ -1,7 +1,7 @@
 require('dotenv').config(); const crypto = require('crypto');
 const express = require('express'), http = require('http'), { Server } = require('socket.io'), Database = require('better-sqlite3'),
   bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken'), { Chess } = require('chess.js'), messaging = require('./messaging'), pp = require('./palpluss'), createPayments = require('./payments'), store = require('./store'), BG = require('./boardgames'), FEES = require('./fees');
-const CK = require('./checkers'), BOTS = require('./bots'), { ckSide, ckMoves } = CK;
+const CK = require('./checkers'), BOTS = require('./bots'), SF = require('./stockfish'), { ckSide, ckMoves } = CK;
 const E = process.env, FEE = +E.PLATFORM_FEE || 0.1;
 const PROD = E.NODE_ENV === 'production' || !!E.RENDER || E.FORCE_PRODUCTION === '1', STAKES = E.STAKES_ENABLED !== '0';   // Render counts as production even if NODE_ENV was forgotten
 // There is NO public default secret: a secret that is known to everyone lets anyone forge a login as any player.
@@ -555,6 +555,8 @@ const pubShape = r => ({ id: r.id, uid: r.uid, name: r.name, text: r.text, at: n
 const pubRows = () => db.prepare('select c.*, p.name pn, p.text pt, p.uid pu from chat c left join chat p on p.id=c.reply_to order by c.id desc limit 80').all().reverse().map(pubShape);
 // ---- Bots: a clearly labelled computer opponent, offered ONLY to a player who has waited in "Find opponent" with nobody to play and who says yes. ----
 const BOT_ON = E.BOTS !== '0', BOT_MAX = +E.BOT_MAX_STAKE || 50, BOT_WAIT = (+E.BOT_WAIT_SECONDS || 20) * 1000, BOT_LOSS = +E.BOT_DAILY_LOSS || 300;
+const BOT_PAID = (E.BOT_STAKED_GAMES === undefined ? 'tictactoe,connect4' : E.BOT_STAKED_GAMES).split(',').map(x => x.trim()).filter(Boolean);   // bots play for money ONLY in these games; every other game is free-play against a bot
+const botOk = (game, stake) => stake === 0 || (stake <= BOT_MAX && BOT_PAID.includes(game));
 BOTS.NAMES.forEach(n => db.prepare("insert or ignore into users(phone,name,hash,is_bot,verified,rating) values(?,?,'!',1,1,1000)").run('bot-' + n.toLowerCase(), '🤖 Bot ' + n));
 function botLossToday() { return -db.prepare("select coalesce(sum(net),0) s from plays where uid in (select id from users where is_bot=1) and created > datetime('now','-1 day')").get().s; }
 function pickBotUser(stake) {
@@ -563,12 +565,20 @@ function pickBotUser(stake) {
   const b = free[crypto.randomInt(0, free.length)]; if (stake && bal(b.id) < stake) add(b.id, 500, 'bot bankroll'); return b;   // the bot plays with house money, capped per day by BOT_DAILY_LOSS
 }
 function botKick(r) {   // called after every state change: if it is a bot's turn, move after a short, human-like pause
-  if (!r.bots || !r.started || r.over || r.botT || !r.bots[r.turn]) return;
+  if (!r.bots || !r.started || r.over || r.botT || r.botWait || !r.bots[r.turn]) return;
   r.botT = setTimeout(() => { r.botT = null; botAct(r); }, 1000 + crypto.randomInt(0, 2000));
 }
 function botAct(r) {
   if (!rooms.has(r.id) || r.over || !r.started || !r.bots[r.turn]) return;
   const i = r.turn, uid = r.players[i];
+  if (r.game === 'chess' && SF.available()) {   // Stockfish thinks in a separate process; the built-in bot is the fallback
+    const fen = r.chess.fen(); r.botWait = true;
+    return SF.best(fen).then(u => {
+      r.botWait = false; if (r.over || r.turn !== i || r.chess.fen() !== fen) return;
+      const m = u ? { from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' } : BOTS.pickMove(r, i, {});
+      if (m) doMove(r, uid, r.names[i], m);
+    }).catch(e => { r.botWait = false; console.error('Stockfish bot error:', e); try { const m = BOTS.pickMove(r, i, {}); if (m) doMove(r, uid, r.names[i], m); } catch {} });
+  }
   try {
     if (r.game === 'ludo' && !r.ludo.die) return doRoll(r, uid);
     const m = BOTS.pickMove(r, i, { lmov, SAFE });
@@ -577,7 +587,7 @@ function botAct(r) {
 }
 function botScan() {   // someone has been waiting a while with nobody to play: offer a bot (they must accept)
   if (!BOT_ON) return; const now = Date.now();
-  queue.forEach((q, key) => { const [game, stake, n] = key.split(':'); if (+n !== 2 || +stake > BOT_MAX) return;
+  queue.forEach((q, key) => { const [game, stake, n] = key.split(':'); if (+n !== 2 || !botOk(game, +stake)) return;
     if (+stake > 0 && botLossToday() >= BOT_LOSS) return;
     q.forEach(u => { const s = online.get(u), t = qt.get(u); if (!s || !t || s.pid || s.botAsk === t || now - t < BOT_WAIT) return; s.botAsk = t; s.emit('botOffer', { game, stake: +stake, max: BOT_MAX }); }); });
 }
@@ -719,7 +729,7 @@ io.on('connection', s => {
   });
   s.on('playBot', ({ game, stake } = {}, cb) => {
     stake = Math.floor(+stake) || 0;
-    if (!BOT_ON || !GAME_IDS.includes(game) || stake < 0 || stake > BOT_MAX) return cb?.({ error: 'A bot is not available for this game' });
+    if (!BOT_ON || !GAME_IDS.includes(game) || stake < 0 || !botOk(game, stake)) return cb?.({ error: 'Bots only play for free in this game. Wait for a person, or try a free game.' });
     if (busy() || s.pid) return cb?.({ error: 'Finish your current game first' });
     if (stake && !STAKES) return cb?.({ error: 'Real-money play is not open yet.' });
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance. You need KES ' + stake });
@@ -776,7 +786,7 @@ process.on('unhandledRejection', e => console.error('Unhandled rejection:', e));
 srv.listen(E.PORT || 3000, () => { console.log('GameArena running on port ' + (E.PORT || 3000) + (STAKES ? '' : ' (free play only)')); pay.start(); store.startBackups(db); });
 let closing = false;   // a deploy sends SIGTERM: stop taking requests, save one last off-site snapshot, then exit
 ['SIGTERM', 'SIGINT'].forEach(sig => process.on(sig, async () => {
-  if (closing) return; closing = true; pay.stop(); srv.close(); setTimeout(() => process.exit(0), 25000).unref();
+  if (closing) return; closing = true; pay.stop(); SF.stop(); srv.close(); setTimeout(() => process.exit(0), 25000).unref();
   try { await store.snapshotNow(db, 'shutdown'); } catch (e) { console.error('Shutdown backup failed:', e.message); }
   try { db.close(); } catch {} process.exit(0);
 }));
