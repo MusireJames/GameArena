@@ -215,3 +215,22 @@ test('database upgrade: works on the original txs table and can be applied twice
   assert.doesNotThrow(() => createPayments({ db, add() {}, pp }));
   const cols = db.prepare('pragma table_info(txs)').all().map(c => c.name); for (const c of ['pid', 'note', 'idem', 'upd', 'tries', 'nexts', 'at']) assert.ok(cols.includes(c), c);
 });
+
+// ---------------- REFERRAL BONUS LOCK ----------------
+test('referral: a locked bonus cannot be withdrawn, the rest can, and it unlocks afterwards', () => {
+  let lock = 10; const add = (id, n, note) => { db.prepare('update users set balance=balance+? where id=?').run(n, id); db.prepare('insert into ledger(uid,amount,note) values(?,?,?)').run(id, n, note); };
+  const Q = createPayments({ db, add, pushBal: () => {}, pp, clock, baseUrl: 'https://game.example', secret: 'sekret', alert: () => {}, env: { WITHDRAW_REVIEW_OVER: '5000', CALLBACK_SECRET: 'sekret' }, locked: u => u === 1 ? lock : 0 });
+  assert.throws(() => Q.createWithdrawal(1, 995), /referral bonus/, 'taking the locked KES 10 is refused');
+  assert.equal(balance(1), 1000);
+  Q.createWithdrawal(1, 990); assert.equal(balance(1), 10);
+  assert.throws(() => Q.createWithdrawal(1, 10), /referral bonus/);
+  Q.createWithdrawal(2, 1000, null, false, 0); assert.equal(balance(2), 0, 'other players are unaffected');
+  lock = 0; Q.createWithdrawal(1, 10); assert.equal(balance(1), 0, 'unlocked: everything can go'); checkLedger();
+});
+test('referral: the deposit hook fires once, after the wallet is credited', async () => {
+  const got = []; const add = (id, n, note) => { db.prepare('update users set balance=balance+? where id=?').run(n, id); db.prepare('insert into ledger(uid,amount,note) values(?,?,?)').run(id, n, note); };
+  const Q = createPayments({ db, add, pushBal: () => {}, pp, clock, baseUrl: 'https://game.example', secret: 'sekret', alert: () => {}, env: { CALLBACK_SECRET: 'sekret' }, onDeposited: (u, a) => got.push([u, a, balance(u)]) });
+  const r = await Q.startDeposit(1, 100); const pid = M.byRef('D' + r.id).transactionId; M.set(pid, 'SUCCESS');
+  await Q.webhook(r.id, { transaction: { id: pid } }); await Q.webhook(r.id, { transaction: { id: pid } }); await Q.tick();
+  assert.deepEqual(got, [[1, 100, 1100]], 'called once with the credited amount, after crediting');
+});
