@@ -79,3 +79,12 @@ test('chess bot: legal moves, takes free material, finds mate in one (needs ches
   const g = new Chess(); let n = 0; while (!g.isGameOver() && n++ < 60) { const mv = g.turn() === 'w' ? B.chess(g, 400) : pick(g.moves({ verbose: true })); g.move({ from: mv.from, to: mv.to, promotion: 'q' }); }
   assert.ok(!(g.isCheckmate() && g.turn() === 'w'), 'bot (white) was not mated by a random player');
 });
+
+test('fallback: every game always has a legal move available from the start, and it is accepted by the rules', () => {
+  const lmov = (L, p) => L.pos[p].map((x, t) => (x < 0 ? L.die === 6 : x + L.die <= 56) ? t : -1).filter(t => t >= 0);
+  for (const g of ['connect4', 'gomoku', 'reversi']) { const b = G.init(g), m = B.anyMove({ game: g, board: b }, 0); assert.ok(G.play(g, b, 0, m), g + ' fallback move is legal'); }
+  const ck = CK.ckInit(), m = B.anyMove({ game: 'checkers', ck, mustFrom: null }, 0); assert.ok(CK.ckMoves(ck, 0, null).some(x => x.from === m.from && x.to === m.to));
+  assert.ok(B.anyMove({ game: 'tictactoe', board: Array(9).fill('') }, 0).i >= 0);
+  assert.equal(B.anyMove({ game: 'ludo', ludo: { pos: [[-1, -1, -1, -1], [-1, -1, -1, -1]], die: 6, seat: [0, 2] } }, 0, { lmov }) != null, true);
+  if (Chess) { const c = new Chess(), mv = B.anyMove({ game: 'chess', chess: c }, 0); assert.ok(c.move({ from: mv.from, to: mv.to, promotion: 'q' })); }
+});
