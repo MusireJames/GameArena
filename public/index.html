@@ -79,7 +79,7 @@ button:disabled{cursor:not-allowed}
 @keyframes lift{from{transform:translateY(0)}to{transform:translateY(-3px)}}
 @keyframes ringp{from{opacity:.35;transform:scale(.9)}to{opacity:1;transform:scale(1.15)}}
 @keyframes roll{0%{transform:rotate(0) scale(.6)}60%{transform:rotate(300deg) scale(1.15)}100%{transform:rotate(360deg) scale(1)}}
-@media(max-width:820px){.cols{grid-template-columns:1fr}.bar{grid-template-columns:1fr auto;padding:0 16px}.logo{letter-spacing:.16em}#who,#onl{display:none}
+@media(max-width:820px){.cols{grid-template-columns:1fr}.bar{grid-template-columns:1fr auto;padding:0 16px}.logo{letter-spacing:.16em}#who{display:none}
  nav{position:fixed;bottom:0;left:0;right:0;z-index:6;justify-content:space-around;background:#1f1e1c;border-top:1px solid var(--line);padding:8px 8px calc(8px + env(safe-area-inset-bottom))}nav button{flex:1;padding:0}
  main{padding:24px 16px 96px}.tiles{grid-template-columns:repeat(2,1fr)}.card{padding:20px}}
 /* ---- mobile fit, board sizing, floating search pill ---- */
@@ -144,7 +144,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
 </style></head><body>
 <header><div class="bar"><div class="logo"><i></i>GAMEARENA</div>
 <nav id="nav" class="hide"><button data-tab="play" class="on" onclick="tab('play');scrollTo(0,0)">Play</button><button class="money" data-tab="wallet" onclick="tab('wallet');scrollTo(0,0)">Wallet</button><button data-tab="tour" onclick="tab('tour');scrollTo(0,0)"><span class="lg">Tournaments</span><span class="sm">Cups</span></button><button data-tab="ranks" onclick="tab('ranks');scrollTo(0,0)">Ranks</button><button data-tab="chat" onclick="tab('chat');scrollTo(0,0)">Chat<i id="cbadge" class="badge hide"></i></button><button data-tab="acct" onclick="tab('acct');scrollTo(0,0)">Account</button></nav>
-<div id="top" class="right hide"><button id="livebtn" class="livebtn hide" onclick="liveGo()" title="Watch live games"><i></i>LIVE <b id="livec">0</b></button><span id="onl" class="mute"></span><span id="who" class="mute"></span><span class="pill money" id="bal">KES 0</span></div></div></header>
+<div id="top" class="right hide"><button id="livebtn" class="livebtn hide" onclick="liveGo()" title="Watch live games"><i></i>LIVE <b id="livec">0</b></button><span id="who" class="mute"></span><span class="pill money" id="bal">KES 0</span></div></div></header>
 <main>
 <div id="auth" class="hero hide"><h1>Play. Stake. Win.</h1><p class="mute">Chess, Checkers, Ludo and more. Free tables or real stakes, paid via M-Pesa.</p>
  <div class="card"><div class="btns" id="amode" style="margin-bottom:24px"><button class="pri" data-m="login" onclick="amode('login')">Login</button><button data-m="signup" onclick="amode('signup')">Create account</button></div>
@@ -207,7 +207,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
   <p class="note" id="tcalc"></p>
   <button class="pri btn1" style="margin-top:16px" onclick="tCreate()">Create tournament</button></div></div></div></section>
 <section id="p-ranks" class="page"><div class="card" style="max-width:560px;margin:0 auto"><h2>Top players</h2><div id="lb"></div></div></section>
-<section id="p-chat" class="page"><div class="card chatc"><h2>Public chat <span id="conl" class="mute"></span></h2><div id="cmsgs"></div><div id="crep" class="hide"></div>
+<section id="p-chat" class="page"><div class="card chatc"><h2>Public chat</h2><div id="cmsgs"></div><div id="crep" class="hide"></div>
  <div class="row nw"><input id="cin" maxlength="300" placeholder="Say something to everyone online" onkeydown="if(event.key=='Enter')pubSend()"><button class="pri" onclick="pubSend()">Send</button></div>
  <p class="note" style="margin:10px 0 0">Be kind. No links or phone numbers. Never share your PIN or password.</p></div></section>
 <section id="p-acct" class="page"><div class="cols">
@@ -329,7 +329,6 @@ sock.on('lobby',l=>{l.forEach(r=>{if(r.by)r.by=cn(r.by)});LB=l;$('rooms').innerH
  sock.on('rematch',r=>{rm=r;toast(r.by+' wants a rematch');if(S)draw(S)});
  sock.on('connect_error',e=>toast(e.message=='excluded'?'Your account is on a self-exclusion break':'Connection problem'));
  sock.on('queue',qUI);
- sock.on('online',n=>{$('onl').textContent=n+' online';$('conl').textContent='· '+n+' online'});
  sock.on('match',m=>{$('srch').classList.add('hide');mid=m.id;m.opp=(m.opp||[]).map(cn);mmd=m;mmc=m.secs;acc=false;$('mm').classList.remove('hide');clearInterval(mt);mmr();mt=setInterval(()=>{mmc=Math.max(0,mmc-1);mmr()},1000)});
  sock.on('matchEnd',e=>{clearInterval(mt);$('mm').classList.add('hide');if(e.msg)toast(e.msg)});
  sock.on('connect',()=>sock.emit('pubhist',{},r=>{pubs=r||[];pubRender(true)}));
