@@ -57,4 +57,4 @@ function play(g, board, side, m) {
   }
   return null;
 }
-module.exports = { is, names, init, play, legal, turnMs, SPEC };
+module.exports = { is, names, init, play, legal, turnMs, SPEC, flips, run };
