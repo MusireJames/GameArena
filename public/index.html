@@ -219,7 +219,7 @@ button,.tile,.sq,.chip{touch-action:manipulation;-webkit-tap-highlight-color:tra
  <div class="row nw"><input id="cin" maxlength="300" placeholder="Say something to everyone online" onkeydown="if(event.key=='Enter')pubSend()"><button id="pmic" title="Voice message" aria-label="Voice message" onclick="vMic(this,pubVoice)">🎤</button><button class="pri" onclick="pubSend()">Send</button></div>
  <p class="note" style="margin:10px 0 0">Be kind. No links or phone numbers. Never share your PIN or password.</p></div></section>
 <section id="p-acct" class="page"><div class="cols">
- <div><div class="card"><h2>Profile</h2><div id="prof"></div><button class="btn1" style="margin-top:20px" onclick="localStorage.removeItem('t');location.reload()">Log out</button></div>
+ <div><div class="card"><h2>Profile</h2><div id="prof"></div><label class="chk" style="margin-top:18px"><input type="checkbox" id="alerts" onchange="setAlerts(this)"> Email me when someone creates a tournament or public table</label><p class="note" style="margin:4px 0 0">Sent to your account email, at most a few a day, and only when you are offline. You can stop them here or with the link in each email.</p><button class="btn1" style="margin-top:20px" onclick="localStorage.removeItem('t');location.reload()">Log out</button></div>
   <div class="card hide" id="refc"><h2>Invite friends, earn KES <span id="refb">10</span></h2><p class="mute" style="margin:0 0 12px">Share your link. When someone joins with it and deposits KES <span id="refm">50</span> or more, you get a bonus. The bonus unlocks for withdrawal after you play one staked game.</p>
    <div class="row nw"><input id="reflink" readonly><button onclick="refCopy()">Copy</button></div><div class="btns" style="margin-top:10px"><button class="pri" onclick="refWa()">Share on WhatsApp</button></div><div id="refstat" style="margin-top:12px"></div></div>
   </div>
@@ -309,6 +309,7 @@ function apkInit(c){if(!c.apk||inApp)return;APK=c.apk;document.querySelectorAll(
  let t=0;try{t=+localStorage.apkNo||0}catch{}
  if(/Android/i.test(navigator.userAgent)&&Date.now()-t>3*864e5)setTimeout(()=>$('apkpop').classList.remove('hide'),3500)}
 const apkNo=()=>{$('apkpop').classList.add('hide');try{localStorage.apkNo=Date.now()}catch{}};
+async function setAlerts(el){const j=await api('alerts',{on:el.checked});if(j.error){el.checked=!el.checked;return toast(j.error)}toast(el.checked?'Email alerts are on':'Email alerts are off')}
 function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=cs(m);document.body.appendChild(d);setTimeout(()=>{d.classList.add('out');setTimeout(()=>d.remove(),260)},3000)}
 function tiles(){const g=GAMES.find(x=>x[0]==G),st=document.body.style;st.setProperty('--ac',g[3]);st.setProperty('--acf',g[4]);
  if(!$('tiles').children.length)$('tiles').innerHTML=GAMES.map(([k,i,n,c,f])=>`<div class="tile" style="--tc:${c};--tf:${f}" onclick="G='${k}';tiles()"><b>${i}</b>${n}</div>`).join('');
@@ -387,7 +388,7 @@ async function aVerify(){$('err').textContent='';const stop=loading($('avbtn'),'
  if(j.token){tok=localStorage.t=j.token;$('lmsg').textContent=apend.purpose=='signup'?'Code accepted. Setting up your account…':'Code accepted. Signing you in…';try{await start()}finally{stop()}}else{stop();$('err').textContent=j.error}}
 async function aResend(){$('err').textContent='';const stop=loading($('rs'),'Sending…','Sending a new code…');let j;try{j=await api('otp/resend',apend)}catch(e){j={error:'Connection problem. Check your internet and try again.'}}stop();if(j.error)return $('err').textContent=j.error;showOtp(j)}
 function aBack(){clearInterval(rsT);$('a2').classList.add('hide');$('a1').classList.remove('hide');$('amode').classList.remove('hide');$('err').textContent=''}
-async function start(){me=await api('me');if(!me.id){localStorage.removeItem('t');$('auth').classList.remove('hide');return}
+async function start(){me=await api('me');if(!me.id){localStorage.removeItem('t');$('auth').classList.remove('hide');return}$('alerts').checked=!!me.alerts;
  $('auth').classList.add('hide');$('app').classList.remove('hide');$('top').classList.remove('hide');$('nav').classList.remove('hide');$('who').textContent=me.name;sndBtn();if(me.admin)$('who').insertAdjacentHTML('afterend','<a href="/admin.html" style="color:#fff">Admin</a>');tiles();side();prof();tOpts();
  sock=io({auth:{token:tok}});
  sock.on('balance',b=>{setBal(b);side();lockUI()});
