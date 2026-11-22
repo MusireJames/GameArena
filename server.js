@@ -24,7 +24,10 @@ if (PROD) {   // refuse to run live with unsafe settings
 const db = store.open(Database, E.DB_FILE || 'data.db');   // WAL + synchronous=FULL: a committed deposit survives a crash
 db.exec(`create table if not exists users(id integer primary key, phone text unique, name text, hash text, balance integer default 0);
 create table if not exists txs(id integer primary key, uid integer, type text, amount integer, ref text, status text default 'pending', created text default current_timestamp)`);
-try { db.exec('alter table tournaments add column live integer default 0'); } catch {}   // tournaments can be made live (watchable) by their creator
+try { db.exec('alter table tournaments add column live integer default 0'); } catch {}
+try { db.exec('alter table plays add column vs_bot integer default 0'); } catch {}
+try { db.exec('alter table chat add column vdur integer default 0'); } catch {}   // voice messages: length in seconds (0 = a text message)
+db.exec('create table if not exists voice(id integer primary key, chat_id integer, mime text, data blob)');   // tournaments can be made live (watchable) by their creator
 for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text', 'is_bot integer default 0', 'ref_code text', 'referred_by integer', 'ref_paid integer default 0']) try { db.exec('alter table users add column ' + c); } catch {}
 // Every account gets a random permanent id. Login tokens carry it, so a token can never be mistaken for another person's account
 // (account numbers 1, 2, 3... are re-used if a database is ever replaced, and that is how people ended up in each other's accounts).
@@ -64,8 +67,78 @@ function refBonus(uid, amt) {   // called after a deposit has been credited
   txn(() => { if (db.prepare('update users set ref_paid=1 where id=? and ref_paid=0').run(uid).changes) { add(ref.id, REF_BONUS, 'referral bonus'); db.prepare('insert into bonuses(uid,amount,at,ref_uid) values(?,?,?,?)').run(ref.id, REF_BONUS, Date.now(), uid); paid = true; } });
   if (paid) { pushBal(ref.id); online.get(ref.id)?.emit('note', 'You earned KES ' + REF_BONUS + ': ' + u.name + ' joined with your link and deposited. Play one staked game to unlock it for withdrawal.'); }
 }
-const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '4mb', verify: (req, res, buf) => { req.rawBody = buf; } })); app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' });
+const app = express(); app.set('trust proxy', 1); app.use(express.json({ limit: '4mb', verify: (req, res, buf) => { req.rawBody = buf; } })); app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()' });
   if (PROD) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains'); next(); });
+app.use('/api', (req, res, next) => { res.set({ 'Cache-Control': 'no-store', Vary: 'Authorization' }); next(); });
+app.use('/api', (req, res, next) => { if (req.method === 'POST') res.on('finish', () => store.touch()); next(); });   // save an off-site copy a few seconds after any change   // a proxy or browser must never reuse one person's answer for another
+app.get('/.well-known/assetlinks.json', (req, res) => {   // lets a Play Store (TWA) build open the site full screen
+  const fp = (E.ANDROID_SHA256 || '').split(',').map(x => x.trim()).filter(Boolean);
+  res.json(E.ANDROID_PACKAGE && fp.length ? [{ relation: ['delegate_permission/common.handle_all_urls'], target: { namespace: 'android_app', package_name: E.ANDROID_PACKAGE, sha256_cert_fingerprints: fp } }] : []);
+});
+app.get('/healthz', (req, res) => { try { db.prepare('select 1').get(); res.send('ok'); } catch { res.status(500).send('db error'); } });
+app.get('/api/config', (req, res) => res.json({ stakes: STAKES, licence: E.LICENCE_NO || '', google: GOOGLE_ID, tfee: E.TOURNAMENT_FEE ? +E.TOURNAMENT_FEE : 0.1 }));
+const legal = f => (req, res) => res.type('html').send(require('fs').readFileSync(require('path').join(__dirname, 'public', f), 'utf8')   // fills the legal templates from .env
+  .replace(/\[COMPANY NAME\]/g, E.COMPANY_NAME || '[COMPANY NAME]').replace(/\[EMAIL\]/g, E.SUPPORT_EMAIL || '[EMAIL]')
+  .replace(/\[LICENCE NUMBER\]/g, E.LICENCE_NO || '[LICENCE NUMBER]').replace(/\[ADD YOUR LICENSED HELPLINE AND SUPPORT ORGANISATION DETAILS\]/g, E.HELPLINE || '[ADD YOUR LICENSED HELPLINE AND SUPPORT ORGANISATION DETAILS]'));
+['terms', 'privacy', 'responsible'].forEach(p => app.get('/' + p + '.html', legal(p + '.html')));
+app.use(express.static('public'));
+const srv = http.createServer(app), io = new Server(srv);
+const kePhone = p => { const n = norm(p); return /^254[17]\d{8}$/.test(n) ? n : null; };   // Kenyan mobile numbers only (07.., 01.., +254..)
+const norm = p => { p = String(p).replace(/\D/g, ''); return p.startsWith('0') ? '254' + p.slice(1) : p.startsWith('254') ? p : '254' + p; };
+const tok = id => { const r = db.prepare('select tv, uuid from users where id=?').get(id); return jwt.sign({ id, u: r.uuid, tv: r.tv || 0 }, SECRET, { expiresIn: '7d' }); };   // u = the account's random permanent id; tv changes when the password is reset, which signs out other devices
+const sameAccount = (row, p) => !!row && !!p.u && row.uuid === p.u && (row.tv || 0) === (p.tv || 0);   // old tokens (no "u") and tokens for a replaced database are refused
+const auth = (req, res, next) => { try { const p = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET, JWT_OPTS), row = db.prepare('select tv, uuid from users where id=?').get(p.id); if (!sameAccount(row, p)) throw new Error('stale login'); req.uid = p.id; next(); } catch { res.status(401).json({ error: 'login' }); } };
+const bal = id => db.prepare('select balance from users where id=?').get(id).balance;
+const add = (id, n, note = n > 0 ? 'credit' : 'debit') => { db.prepare('update users set balance=balance+? where id=?').run(n, id); if (n) db.prepare('insert into ledger(uid,amount,note) values(?,?,?)').run(id, n, note); };   // every wallet change is logged
+const phoneOf = id => db.prepare('select phone from users where id=?').get(id)?.phone;
+const REVIEW = +E.WITHDRAW_REVIEW_OVER || 5000, isAdmin = id => (E.ADMIN_PHONES || '').split(',').filter(Boolean).map(norm).includes(phoneOf(id));
+
+const txn = fn => { db.exec('BEGIN IMMEDIATE'); try { const v = fn(); db.exec('COMMIT'); return v; } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; } };   // all or nothing, so a crash never leaves money half moved
+const hold = (rid, uid, amt) => { if (amt) txn(() => { add(uid, -amt, 'stake'); db.prepare('insert or replace into escrow(rid,uid,amount) values(?,?,?)').run(rid, uid, amt); }); };   // a stake taken for a live game is also written to disk...
+const unhold = (rid, uid) => db.prepare('delete from escrow where rid=? and uid=?').run(rid, uid);
+txn(() => { for (const e of db.prepare('select * from escrow').all()) add(e.uid, e.amount, 'stake refund (server restarted)'); db.exec('delete from escrow'); });   // ...because games live only in memory: at start-up every stake still held is given back
+const hits = new Map(), fails = new Map();   // fails: wrong-password times per phone   // simple in-memory rate limiter
+const limit = (n, ms) => (req, res, next) => { const k = req.ip + req.baseUrl + req.path, now = Date.now(), a = (hits.get(k) || []).filter(t => now - t < ms);
+  if (a.length >= n) return res.status(429).json({ error: 'Too many attempts. Please wait a minute.' }); a.push(now); hits.set(k, a); next(); };
+app.use(['/api/login', '/api/register', '/api/otp', '/api/reset'], limit(30, 60000));   // per endpoint, per IP (many phones share one IP on mobile networks)
+app.use(['/api/deposit', '/api/withdraw'], limit(12, 60000)); app.use('/api/tournaments', limit(60, 60000));
+app.get('/api/leaderboard', (req, res) => res.json(db.prepare(   // top 5 people by games won, with the last game each one won (no ratings shown)
+  "select u.name, count(*) wins, (select p2.game from plays p2 where p2.uid=u.id and p2.result='win' and p2.vs_bot=0 order by p2.id desc limit 1) last_game, max(p.created) last_at from plays p join users u on u.id=p.uid where p.result='win' and p.vs_bot=0 and u.is_bot=0 group by u.id order by wins desc, max(p.id) desc limit 5").all()));
+app.get('/api/history', auth, (req, res) => {
+  const a = db.prepare("select type t, '' label, amount, status, created at from txs where uid=? order by id desc limit 20").all(req.uid);
+  const b = db.prepare("select 'game' t, game label, net amount, result status, created at from plays where uid=? order by id desc limit 20").all(req.uid);
+  res.json([...a, ...b].sort((x, y) => y.at.localeCompare(x.at)).slice(0, 25));
+});
+app.post('/api/limits', auth, (req, res) => {   // responsible play: daily deposit limit and self-exclusion
+  if (req.body.daily != null) db.prepare('update users set daily_limit=? where id=?').run(Math.max(0, Math.floor(+req.body.daily) || 0), req.uid);
+  if (req.body.exclude) { const until = new Date(Date.now() + Math.min(180, +req.body.exclude || 1) * 864e5).toISOString();
+    db.prepare('update users set excluded_until=? where id=? and (excluded_until is null or excluded_until < ?)').run(until, req.uid, until); }
+  res.json({ ok: true });
+});
+const admin = (req, res, next) => isAdmin(req.uid) ? next() : res.status(403).json({ error: 'Admins only' });
+app.get('/api/admin/summary', auth, admin, async (req, res) => {
+  const n = q => db.prepare(q).get().v;
+  res.json({ users: n('select count(*) v from users where is_bot=0'), balances: n('select coalesce(sum(balance),0) v from users where is_bot=0'),
+    botNet: n("select coalesce(sum(net),0) v from plays where uid in (select id from users where is_bot=1)"), botToday: -botLossToday(), botGames: n("select count(*) v from plays where uid in (select id from users where is_bot=1)"),
+    refPaid: n('select coalesce(sum(amount),0) v from bonuses'), refCount: n('select count(*) v from bonuses'), refLocked: n('select coalesce(sum(amount),0) v from bonuses where unlocked=0'),
+    deposits: n("select coalesce(sum(amount),0) v from txs where type='deposit' and status='done'"),
+    withdrawals: n("select coalesce(sum(amount),0) v from txs where type='withdraw' and status='done'"),
+    fees: n('select coalesce(sum(amount),0) v from house'),
+    mismatch: n("select count(*) v from users u where balance != (select coalesce(sum(amount),0) from ledger where uid=u.id)"),
+    depositors: n("select count(distinct uid) v from txs where type='deposit' and status='done'"),
+    active: n("select count(distinct uid) v from plays where created > datetime('now','-1 day')"),
+    byGame: db.prepare('select game, count(*) plays, coalesce(sum(stake),0) staked from plays group by game').all(),
+    kyc: db.prepare("select id, name, phone, id_number from users where kyc='pending'").all(),
+    tickets: db.prepare("select t.id, t.msg, t.created, u.name, u.phone from tickets t join users u on u.id=t.uid where t.status='open' order by t.id").all(),
+    ...pay.overview(), payBalance: await svcBalance(),   // review / queued / stuck withdrawals, and the PalPluss service wallet balance
+    depReview: db.prepare("select t.id, t.ref, t.amount, t.created, t.note, u.phone from txs t join users u on u.id=t.uid where t.type='deposit' and t.status='review' order by t.id").all(),
+    flags: db.prepare('select note, created from flags order by id desc limit 20').all() });
+});
+// ---- Deposits (STK Push) and withdrawals (B2C) through PalPluss. All the money logic is in payments.js and is tested in payments.test.js ----
+const alertAdmin = text => { console.warn('ALERT:', text); try { db.prepare('insert into flags(note) values(?)').run('ALERT: ' + String(text).slice(0, 480)); } catch {} if (E.ADMIN_EMAIL) messaging.notify(E.ADMIN_EMAIL, 'GameArena alert', text).catch(e => console.error('Alert email failed:', e.message)); };
+const pay = createPayments({ db, add, pushBal, pp, alert: alertAdmin, baseUrl: E.BASE_URL || '', secret: CB_SECRET, locked: lockedOf, onDeposited: refBonus });
+const svc = { at: 0, v: null }; const svcBalance = async () => { if (Date.now() - svc.at > 60000) { svc.at = Date.now(); try { svc.v = await pp.serviceBalance(); } catch { svc.v = null; } } return svc.v; };
+app.post('/api/palpluss/webhook/:secret/:id', (req, res) => {   // PalPluss does not sign webhooks, so this is only a nudge: payments.js confirms the result wnsport-Security', 'max-age=31536000; includeSubDomains'); next(); });
 app.use('/api', (req, res, next) => { res.set({ 'Cache-Control': 'no-store', Vary: 'Authorization' }); next(); });
 app.use('/api', (req, res, next) => { if (req.method === 'POST') res.on('finish', () => store.touch()); next(); });   // save an off-site copy a few seconds after any change   // a proxy or browser must never reuse one person's answer for another
 app.get('/.well-known/assetlinks.json', (req, res) => {   // lets a Play Store (TWA) build open the site full screen
