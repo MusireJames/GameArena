@@ -28,7 +28,7 @@ try { db.exec('alter table tournaments add column live integer default 0'); } ca
 try { db.exec('alter table plays add column vs_bot integer default 0'); } catch {}
 try { db.exec('alter table chat add column vdur integer default 0'); } catch {}   // voice messages: length in seconds (0 = a text message)
 db.exec('create table if not exists voice(id integer primary key, chat_id integer, mime text, data blob)');   // tournaments can be made live (watchable) by their creator
-for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text', 'is_bot integer default 0', 'ref_code text', 'referred_by integer', 'ref_paid integer default 0']) try { db.exec('alter table users add column ' + c); } catch {}
+for (const c of ['dob text', 'daily_limit integer default 0', 'excluded_until text', 'rating integer default 1000', "kyc text default 'none'", 'id_number text', 'kyc_photo text', 'ip text', 'email text', "channel text default 'sms'", 'verified integer default 0', 'tv integer default 0', 'uuid text', 'is_bot integer default 0', 'ref_code text', 'referred_by integer', 'ref_paid integer default 0', 'alerts integer default 0', 'alert_last integer default 0', 'alert_day text', 'alert_n integer default 0']) try { db.exec('alter table users add column ' + c); } catch {}
 // Every account gets a random permanent id. Login tokens carry it, so a token can never be mistaken for another person's account
 // (account numbers 1, 2, 3... are re-used if a database is ever replaced, and that is how people ended up in each other's accounts).
 db.exec(`update users set uuid=lower(hex(randomblob(16))) where uuid is null;
@@ -270,7 +270,7 @@ app.post('/api/otp/resend', async (req, res) => {
   const { _ch, _dest, ...p } = JSON.parse(o.payload);
   try { res.json({ ok: true, ...await issueOtp(ph, purpose, p, _ch, _dest) }); } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.get('/api/me', auth, (req, res) => { const u = db.prepare('select id,name,phone,balance,rating,daily_limit,excluded_until,kyc from users where id=?').get(req.uid); res.json({ ...u, locked: Math.min(u.balance, lockedOf(req.uid)), admin: isAdmin(req.uid) }); });
+app.get('/api/me', auth, (req, res) => { const u = db.prepare('select id,name,phone,balance,rating,daily_limit,excluded_until,kyc,alerts from users where id=?').get(req.uid); res.json({ ...u, locked: Math.min(u.balance, lockedOf(req.uid)), admin: isAdmin(req.uid) }); });
 app.get('/api/referral', auth, (req, res) => {
   const code = ensureRef(req.uid), q = s => db.prepare(s).get(req.uid);
   res.json({ on: REF_ON, code, link: (E.BASE_URL || '').replace(/\/$/, '') + '/?ref=' + code, bonus: REF_BONUS, min: REF_MIN,
@@ -317,6 +317,40 @@ const rooms = new Map(), online = new Map(); let rid = 1;
 const SAFE = [0, 8, 13, 21, 26, 34, 39, 47];
 const tcParse = tc => { const [m, i] = String(tc || '10+0').split('+').map(Number), ok = m > 0 && m <= 60 && i >= 0 && i <= 60, M = ok ? m : 10, I = ok ? i : 0; return { clock: [M * 6e4, M * 6e4], inc: I * 1e3, tc: M + '+' + I }; };
 const mkCode = () => { let c; do c = crypto.randomBytes(3).toString('hex').toUpperCase(); while ([...rooms.values()].some(r => r.code === c)); return c; };
+// ---- Email alerts (opt-in): tell people who turned them on when someone opens a tournament or a public table ----
+const ALERT_ON = E.ALERTS !== '0', ALERT_GAP = (+E.ALERT_GAP_MIN || 30) * 60000, ALERT_DAILY = +E.ALERT_DAILY_MAX || 6, ALERT_MAX = +E.ALERT_MAX_RECIPIENTS || 300;
+const unsubTok = id => crypto.createHmac('sha256', SECRET).update('unsub:' + id).digest('hex').slice(0, 32);
+const GAME_LABEL = { tictactoe: 'Tic-tac-toe', connect4: 'Connect 4' }, gname = g => GAME_LABEL[g] || g.charAt(0).toUpperCase() + g.slice(1);
+const alertByHost = new Map(); let alertChain = Promise.resolve();
+function notifyNew(kind, uid, d) {
+  if (!ALERT_ON || !messaging.emailConfigured()) return;
+  const now = Date.now(); if (now - (alertByHost.get(uid) || 0) < 10 * 60000) return; alertByHost.set(uid, now);   // one host cannot trigger a flood
+  const base = (E.BASE_URL || '').replace(/\/$/, ''), g = gname(d.game);
+  const subject = kind === 'tournament' ? 'New tournament on GameArena: ' + d.name : 'New ' + g + ' table is open' + (d.stake ? ' (KES ' + d.stake + ')' : '');
+  const what = kind === 'tournament' ? d.by + ' created the ' + g + ' tournament "' + d.name + '" (' + (d.fee ? 'entry KES ' + d.fee : 'free to enter') + ').' : d.by + ' opened a public ' + g + ' table (' + (d.stake ? 'KES ' + d.stake + ' stake' : 'free') + ').';
+  alertChain = alertChain.then(async () => {
+    const day = new Date().toISOString().slice(0, 10), t = Date.now();
+    const rows = db.prepare("select id, email, alert_day, alert_n from users where alerts=1 and is_bot=0 and ifnull(email,'')!='' and id!=? and (excluded_until is null or excluded_until < ?) and ?-alert_last >= ? limit ?").all(uid, new Date().toISOString(), t, ALERT_GAP, ALERT_MAX);
+    for (const u of rows) {
+      if (online.has(u.id)) continue;   // people who are online already see it in the lobby
+      const n = u.alert_day === day ? u.alert_n : 0; if (n >= ALERT_DAILY) continue;
+      const text = what + '\n\nJoin here: ' + base + '/\n\n18+ only. Play responsibly.\nYou get this email because you turned on alerts in your GameArena account. Stop them any time: ' + base + '/unsub?u=' + u.id + '&t=' + unsubTok(u.id);
+      try { await messaging.notify(u.email, subject, text); db.prepare('update users set alert_last=?, alert_day=?, alert_n=? where id=?').run(Date.now(), day, n + 1, u.id); }
+      catch (e) { console.error('Alert email failed:', e.message); if (/Email delivery failed|EMAIL/.test(e.message)) break; }
+      await new Promise(r => setTimeout(r, 300));   // gentle on the mail relay
+    }
+  }).catch(e => console.error('Alerts:', e.message));
+}
+app.get('/unsub', (req, res) => {
+  const id = +req.query.u, t = String(req.query.t || ''), ok = id > 0 && t.length === 32 && crypto.timingSafeEqual(Buffer.from(t), Buffer.from(unsubTok(id)));
+  if (ok) db.prepare('update users set alerts=0 where id=?').run(id);
+  res.type('html').send('<meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:sans-serif;background:#1a1a18;color:#eee;text-align:center;padding:60px 20px"><h2>' + (ok ? 'You are unsubscribed' : 'This link is not valid') + '</h2><p>' + (ok ? 'You will no longer get table and tournament emails.' : 'You can change alerts in Account on the site.') + '</p><a style="color:#81b64c" href="/">Back to GameArena</a>');
+});
+app.post('/api/alerts', auth, (req, res) => {
+  const on = req.body.on ? 1 : 0, u = db.prepare('select email from users where id=?').get(req.uid);
+  if (on && !u?.email) return res.status(400).json({ error: 'Add an email address to your account first' });
+  db.prepare('update users set alerts=? where id=?').run(on, req.uid); res.json({ ok: true, alerts: on });
+});
 const GAME_IDS = ['chess', 'tictactoe', 'ludo', 'checkers', ...BG.names];
 const nextTurn = r => { do r.turn = (r.turn + 1) % r.players.length; while (r.out[r.turn]); };
 const lmov = (L, p) => L.pos[p].map((x, t) => (x < 0 ? L.die === 6 : x + L.die <= 56) ? t : -1).filter(t => t >= 0);
@@ -544,7 +578,7 @@ app.post('/api/tournaments', auth, (req, res) => {
   const rounds = Math.round(Math.log(size) / Math.log(g)), tc = game === 'chess' ? tcParse(b.tc).tc : null;
   const id = db.prepare('insert into tournaments(uid,name,game,fee,g,size,rounds,tc,live) values(?,?,?,?,?,?,?,?,?)').run(req.uid, name, game, fee, g, size, rounds, tc, b.live ? 1 : 0).lastInsertRowid;
   if (b.enter !== false) joinT(id, req.uid);
-  tPush(id); res.json({ ok: true, id });
+  tPush(id); notifyNew('tournament', req.uid, { name, game, fee, by: db.prepare('select name from users where id=?').get(req.uid)?.name || 'A player' }); res.json({ ok: true, id });
 });
 const tAct = fn => (req, res) => { const t = db.prepare('select uid from tournaments where id=?').get(+req.params.id);
   if (fn === cancelT && t && t.uid !== req.uid && !isAdmin(req.uid)) return res.status(403).json({ error: 'Only the creator can cancel' });
@@ -696,7 +730,7 @@ io.on('connection', s => {
     const r = { id: rid++, game, stake, size: game === 'ludo' ? Math.min(4, Math.max(2, Math.floor(+size) || 4)) : 2, out: [], ...(game === 'chess' && tcParse(tc)), code: mkCode(), listed: !!listed, live: !!live, started: false, ready: [false], players: [uid], names: [me], turn: 0, over: false };
     const prev = rooms.get(s.rid); if (prev && prev.over) s.to('r' + prev.id).emit('rematch', { code: r.code, by: me, stake });
     hold(r.id, uid, stake);   // the host's stake is held in escrow
-    rooms.set(r.id, r); s.join('r' + r.id); s.rid = r.id; pushBal(uid); cb?.({ code: r.code }); io.emit('lobby', lobby()); send(r);
+    rooms.set(r.id, r); s.join('r' + r.id); s.rid = r.id; pushBal(uid); cb?.({ code: r.code }); io.emit('lobby', lobby()); send(r); if (r.listed) notifyNew('table', uid, { game, stake, by: me });
   });
   // ---- Watching live games: spectators get the same board updates, but can never move, chat into the game or see anything private ----
   const stopWatching = () => { if (s.spec) { s.leave('v' + s.spec); s.spec = null; liveTick(); } };
@@ -726,7 +760,7 @@ io.on('connection', s => {
     if (stake && bal(uid) < stake) return cb?.({ error: 'Insufficient balance' });
     if ([...rooms.values()].filter(x => x.open && !x.started && x.players[0] === uid).length >= MAX_OPEN) return cb?.({ error: 'You can have up to ' + MAX_OPEN + ' open tables at once' });
     const r = { id: rid++, game, stake, size: 2, out: [], ...(game === 'chess' && tcParse(tc)), code: mkCode(), listed: true, open: true, live: !!live, started: false, ready: [true], players: [uid], names: [me], turn: 0, over: false, born: Date.now() };
-    hold(r.id, uid, stake); rooms.set(r.id, r); s.join('r' + r.id); pushBal(uid); io.emit('lobby', lobby()); cb?.({ ok: true, id: r.id });   // the host is not pulled into a game screen: he can keep browsing and open more tables
+    hold(r.id, uid, stake); rooms.set(r.id, r); s.join('r' + r.id); pushBal(uid); io.emit('lobby', lobby()); notifyNew('table', uid, { game, stake, by: me }); cb?.({ ok: true, id: r.id });   // the host is not pulled into a game screen: he can keep browsing and open more tables
   });
   s.on('cancelTable', ({ id } = {}, cb) => { const r = rooms.get(Math.floor(+id)); if (!r || !r.open || r.started || r.players[0] !== uid) return cb?.({ error: 'That table is gone' }); closeTable(r); cb?.({ ok: true }); });
   s.on('accept', ({ id } = {}, cb) => {   // accept a challenge: both players stake and the game starts at once
