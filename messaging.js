@@ -41,9 +41,12 @@ async function viaSmtp(to, subject, text) {
 }
 
 async function sendEmail(to, subject, text) {
-  if (E.MAIL_RELAY_URL && E.MAIL_RELAY_SECRET) return viaRelay(to, subject, text);
-  if (E.SMTP_HOST) return viaSmtp(to, subject, text);
-  return false;
+  try {
+    if (E.MAIL_RELAY_URL && E.MAIL_RELAY_SECRET) return await viaRelay(to, subject, text);
+    if (E.SMTP_HOST) return await viaSmtp(to, subject, text);
+    console.warn('EMAIL NOT SENT: no MAIL_RELAY_URL + MAIL_RELAY_SECRET (or SMTP_HOST) is set');
+    return false;
+  } catch (e) { console.error('EMAIL FAILED (' + subject + '):', e.message); throw e; }   // shows the real reason in the Render logs
 }
 
 exports.emailConfigured = () => !!((E.MAIL_RELAY_URL && E.MAIL_RELAY_SECRET) || E.SMTP_HOST);
